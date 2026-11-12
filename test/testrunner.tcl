@@ -34,7 +34,15 @@ proc find_interpreter {} {
   set rc [catch { package require sqlite3 }]
   if {$rc} {
     if {[file readable pkgIndex.tcl] && [catch {source pkgIndex.tcl}]==0} {
+      # Since $dir is defined to be the [pwd], if the "source pkgIndex.tcl"
+      # worked, that should have enabled us to use the locally built 
+      # copy of the TCL extension.
       set rc [catch { package require sqlite3 }]
+      if {!$rc} {
+        puts "Using the locally built copy of the \"sqlite3\" tcl extension"
+      } else {
+        puts "The locally built copy of the \"sqlite3\" tcl extension does work..."
+      }
     }
   }
   if {$rc} {
@@ -49,7 +57,7 @@ proc find_interpreter {} {
     }
   }
   if {$rc} {
-    puts "Cannot find tcl package sqlite3: Trying to build it now..."
+    puts "Cannot find tcl package \"sqlite3\": Trying to build it now..."
     if {$::tcl_platform(platform) eq "windows"} {
       set bat [open make-tcl-extension.bat w]
       puts $bat "nmake /f Makefile.msc tclextension"
@@ -87,6 +95,11 @@ if {[info commands clock_milliseconds]==""} {
   }
 }
 
+# Ensure DEBUGINFOD_URLS is unset. Leaving it set causes some sanitizer
+# test cases to run slowly on Ubuntu.
+#
+unset -nocomplain ::env(DEBUGINFOD_URLS)
+
 #-------------------------------------------------------------------------
 # Usage:
 #
@@ -97,14 +110,17 @@ proc usage {} {
 Usage: 
     $a0 ?SWITCHES? ?PERMUTATION? ?PATTERNS?
     $a0 PERMUTATION FILE
+    $a0 clean
     $a0 errors ?-v|--verbose? ?-s|--summary? ?PATTERN?
+    $a0 estwork
+    $a0 halt
     $a0 help
     $a0 joblist ?PATTERN?
     $a0 njob ?NJOB?
+    $a0 retest
+    $a0 make CONFIG TARGETS
     $a0 script ?-msvc? CONFIG
     $a0 status ?-d SECS? ?--cls?
-    $a0 halt
-    $a0 estwork
 
   where SWITCHES are:
     --buildonly              Build test exes but do not run tests
@@ -120,41 +136,49 @@ Usage:
     --stop-on-error          Stop running after any reported error
     --zipvfs ZIPVFSDIR       ZIPVFS source directory
 
-Special values for PERMUTATION that work with plain tclsh:
+Special values for PERMUTATION include:
 
-    list      - show all allowed PERMUTATION arguments.
+    list      - show allowed PERMUTATION arguments.
     mdevtest  - tests recommended prior to normal development check-ins.
+    devtest   - alias for "mdevtest"
     release   - full release test with various builds.
+    c         - tests in test/c directory only.
     sdevtest  - like mdevtest but using ASAN and UBSAN.
-
-Other PERMUTATION arguments must be run using testfixture, not tclsh:
-
     all       - all tcl test scripts, plus a subset of test scripts rerun
                 with various permutations.
     full      - all tcl test scripts.
     veryquick - a fast subset of the tcl test scripts. This is the default.
+
+The interpreter that runs this script can be an ordinary "tclsh" as long
+as "package require sqlite3" works, or it can be "testfixture".
 
 If no PATTERN arguments are present, all tests specified by the PERMUTATION
 are run. Otherwise, each pattern is interpreted as a glob pattern. Only
 those tcl tests for which the final component of the filename matches at
 least one specified pattern are run.  The glob wildcard '*' is prepended
 to the pattern if it does not start with '^' and appended to every
-pattern that does not end with '$'.
-
-If no PATTERN arguments are present, then various fuzztest, threadtest
-and other tests are run as part of the "release" permutation. These are
-omitted if any PATTERN arguments are specified on the command line.
+pattern that does not end with '$'.  If any PATTERN argument begins with "~",
+then it is an anti-pattern.  When PATTERN arguments are present, tests are
+only run if they match one or more patterns and match no anti-patterns.
 
 If a PERMUTATION is specified and is followed by the path to a Tcl script
 instead of a list of patterns, then that single Tcl test script is run
 with the specified permutation.
 
 The "status" and "njob" commands are designed to be run from the same
-directory as a running testrunner.tcl script that is running tests. The
-"status" command prints a report describing the current state and progress 
-of the tests.  Use the "-d N" option to have the status display clear the
-screen and repeat every N seconds.  The "njob" command may be used to query
-or modify the number of sub-processes the test script uses to run tests.
+directory as a running testrunner.tcl script.  The "status" command prints
+a report describing the current state and progress of the tests.  Use
+the "-d N" option to have the status display clear the screen and repeat
+every N seconds.  The "njob" command may be used to query or modify the
+number of sub-processes the test script uses to run tests.
+
+The "halt" command modifies the database so that all tasks are marked
+as complete.  Testing will halt when all tests currently running complete.
+
+The "clean" command removes files and directories created by a prior
+invocation of testrunner.tcl.
+
+The "make" command runs "make" configured for the specific CONFIG.
 
 The "script" command outputs the script used to build a configuration.
 Add the "-msvc" option for a Windows-compatible script. For a list of
@@ -166,6 +190,9 @@ are used.  Otherwise, an attempt is made to minimize the output to show
 only the parts that contain the error messages.  The --summary option just
 shows the jobs that failed.  If PATTERN are provided, the error information
 is only provided for jobs that match PATTERN.
+
+The "retest" command reruns tests that failed or were never completed
+by the previous invocation of testrunner.tcl.
 
 Full documentation here: https://sqlite.org/src/doc/trunk/doc/testrunner.md
   }]]
@@ -217,6 +244,33 @@ proc default_njob {} {
   }
   return $nHelper
 }
+
+# Return true if the current test is using Fil-C. False otherwise.
+#
+proc is_fil_cc {} {
+  set ret 0
+  if {[catch { exec $::env(CC) --version } msg]==0 
+   && [string first Fil-C $msg]>=0
+  } {
+    set ret 1
+  }
+  return $ret
+}
+
+# Return the default value for the -nbuild switch. This value limits the
+# number of build jobs that may be run concurrently. Usually there is
+# no special limit for this, but with Fil-C the compiler has been observed
+# using up to 8GB of memory to build sqlite3.c, so in this case the default
+# limit is two concurrent builds.
+#
+proc default_nbuild {} {
+  set ret -1
+  if {$::TRG(fil-cc)} {
+    set ret 2
+  }
+  return $ret
+}
+
 #-------------------------------------------------------------------------
 
 #-------------------------------------------------------------------------
@@ -227,7 +281,9 @@ set TRG(logname) [file normalize testrunner.log]
 set TRG(build.logname) [file normalize testrunner_build.log]
 set TRG(info_script) [file normalize [info script]]
 set TRG(timeout) 10000              ;# Default busy-timeout for testrunner.db 
+set TRG(fil-cc)  [is_fil_cc]        ;# True for fil-cc on Linux */
 set TRG(nJob)    [default_njob]     ;# Default number of helper processes
+set TRG(nBuild)  [default_nbuild]   ;# Default number of max build processes
 set TRG(patternlist) [list]
 set TRG(cmdline) $argv
 set TRG(reporttime) 2000
@@ -253,7 +309,8 @@ switch -nocase -glob -- $tcl_platform(os) {
     set TRG(run)         run.sh
     set TRG(runcmd)      "bash run.sh"
   }
-  *linux* - MSYS_NT* - MINGW64_NT* - MINGW32_NT* {
+  *linux* - MSYS_NT* - MINGW64_NT* - MINGW32_NT* -
+  *haiku* {
     set TRG(platform)    linux
     set TRG(make)        make.sh
     set TRG(makecmd)     "bash make.sh"
@@ -262,6 +319,9 @@ switch -nocase -glob -- $tcl_platform(os) {
     set TRG(run)         run.sh
     set TRG(runcmd)      "bash run.sh"
   }
+  *freebsd* -
+  *netbsd* -
+  *dragonfly* -
   *openbsd* {
     set TRG(platform)    linux
     set TRG(make)        make.sh
@@ -287,8 +347,8 @@ switch -nocase -glob -- $tcl_platform(os) {
       set TRG(platform)  cygwin
       set TRG(make)      make.sh
       set TRG(makecmd)   "bash make.sh"
-      set TRG(testfixture) testfixture
-      set TRG(shell)       sqlite3
+      set TRG(testfixture) testfixture.exe
+      set TRG(shell)       sqlite3.exe
       set TRG(run)       run.sh
       set TRG(runcmd)    "bash run.sh"
     }
@@ -298,6 +358,9 @@ switch -nocase -glob -- $tcl_platform(os) {
     error "cannot determine platform!"
   }
 }
+set TRG(testfixture-fullpath) [file join $dir $TRG(testfixture)]
+set TRG(shell-fullpath) [file join $dir $TRG(shell)]
+set TRG(interp) [info nameofexec]
 #-------------------------------------------------------------------------
 
 #-------------------------------------------------------------------------
@@ -451,6 +514,32 @@ if {([llength $argv]==2 || [llength $argv]==1)
 #--------------------------------------------------------------------------
 
 #--------------------------------------------------------------------------
+# Check if this is the "clean" command:
+#
+if {([llength $argv]==2 || [llength $argv]==1) 
+ && [string compare -nocase clean [lindex $argv 0]]==0
+} {
+  set pattern {_(fuzzcheck|sessionfuzz|sqlite3|testfixture)}
+  foreach f [glob testrun_*] {
+    if {[file isdir $f] && [regexp $pattern $f]} {
+      file delete -force $f
+    }
+  }
+  foreach f [glob testdir*] {
+    if {[file isdir $f] && [regexp {^testdir[0-9]+$} $f]} {
+      file delete -force $f
+    }
+  }
+  foreach f [glob testrunner.db*] {
+    file delete -force $f
+  }
+  file delete -force testrunner.log
+  exit
+}
+
+#--------------------------------------------------------------------------
+
+#--------------------------------------------------------------------------
 # Check if this is the "halt" command:
 #
 if {[llength $argv]==1
@@ -536,6 +625,87 @@ if {[string compare -nocase script [lindex $argv 0]]==0} {
   set config [lindex $argv [expr [llength $argv]-1]]
 
   puts [trd_buildscript $config [file dirname $testdir] $bMsvc]
+  exit
+}
+
+#--------------------------------------------------------------------------
+# Check if this is the "make" command.  Example:
+#
+#    test/testrunner.tcl make Debug-Two clean testfixture
+#                             \_______/ \_______________/
+#         Configuration ----------^            ^---------- Arguments to "make"
+#
+# This works by running the equivalent of "testrunner.tcl script" to generate
+# the approprate shell script or BAT file, then invoking that script.  The 
+# generated script is usually deleted automatically, but that can be suppressed
+# using the --keep option.
+#
+if {[string compare -nocase "make" [lindex $argv 0]]==0} {
+  set bKeep 0
+  set bDryRun 0
+  set Config {}
+  set MakeArgs [list]
+  for {set i 1} {$i<[llength $argv]} {incr i} {
+    set arg [lindex $argv $i]
+    if {$arg eq "-keep" || $arg eq "--keep"} {
+      set bKeep 1
+      continue
+    }
+    if {[regexp {^--?dry-?run$} $arg] || [regexp {^--?n$} $arg]} {
+      set bDryRun 1
+      continue
+    }
+    if {$Config eq ""} {
+      if {![info exists ::trd::build($arg)]} {
+        puts stderr "No such configuration: $arg"
+        puts stderr "Should be one of: [lsort [array names ::trd::build]]"
+        exit 1
+      }
+      set Config $arg
+      continue
+    }
+    lappend MakeArgs $arg
+  }
+  if {$Config eq ""} {
+    puts stderr "Missing configuration name"
+    puts stderr "Run \"$argv0 help\" for help"
+    exit 1
+  }
+  set scriptname testrunner-[expr {int(rand()*1000000)}][clock seconds]
+  if {$tcl_platform(platform) eq "windows"} {
+    set bMsvc 1
+    append scriptname .bat
+  } else {
+    set bMsvc 0
+    append scriptname .sh
+  }
+  if {$bDryRun} {
+    puts "Script \"$scriptname\" would have been:"
+    puts [trd_buildscript $Config [file dirname $testdir] $bMsvc $MakeArgs]
+    exit 0
+  }
+  set fd [open $scriptname w]
+  puts $fd [trd_buildscript $Config [file dirname $testdir] $bMsvc $MakeArgs]
+  close $fd
+  if {$bMsvc} {
+    set rc [catch {
+      exec $scriptname >@stdout
+    } msg]
+    set rc 0
+  } else {
+    set rc [catch {
+      exec sh $scriptname >@stdout 2>@stderr
+    } msg]
+  }
+  if {$bKeep} {
+    puts "script retained in \"$scriptname\"
+  } else {
+    file delete -force $scriptname
+  }
+  if {$rc} {
+    puts stderr "make failed: $msg"
+    exit 1
+  }
   exit
 }
 
@@ -906,6 +1076,10 @@ for {set ii 0} {$ii < [llength $argv]} {incr ii} {
       } else {
         set TRG(fullstatus) 1
       }
+    } elseif {($n>2 && [string match "$a*" --nbuild]) || $a=="-nb"} {
+      incr ii
+      set TRG(nBuild) [lindex $argv $ii]
+      if {$isLast} { usage }
     } else {
       usage
     }
@@ -984,22 +1158,36 @@ proc r_write_db {tcl} {
 }
 
 # Obtain a new job to be run by worker $iJob (an integer). A job is
-# returned as a three element list:
-#
-#    {$build $config $file}
+# returned as a serialized array containing all fields from the "jobs"
+# table. 
 #
 proc r_get_next_job {iJob} {
   global T
-
-  if {($iJob%2)} {
-    set orderby "ORDER BY priority ASC"
-  } else {
-    set orderby "ORDER BY priority DESC"
-  }
-
-  set ret [list]
+  global TRG
+  set orderby ""
 
   r_write_db {
+    # If the TRG(nBuild) variable is greater than 0, count how many builds 
+    # are running already. If there are $TRG(nBuild) or more, ensure that
+    # something other than a build is selected to run next.
+    #
+    if {$TRG(nBuild)>0} {
+      set n [trdb one {
+        SELECT count(*) FROM jobs WHERE state='running' AND displaytype='bld'
+      }]
+      if {$n>=$TRG(nBuild)} {
+        set orderby "AND displaytype!='bld' "
+      }
+    }
+
+    if {($iJob%2)} {
+      append orderby "ORDER BY priority ASC"
+    } else {
+      append orderby "ORDER BY priority DESC"
+    }
+
+    set ret [list]
+
     set query "
       SELECT * FROM jobs AS j WHERE state='ready' $orderby LIMIT 1
     " 
@@ -1117,10 +1305,21 @@ proc add_job {args} {
 #
 # An empty patternlist matches everything
 #
+# Entries of patternlist that begin with "~" mean "match anything that
+# does not match the following pattern".  For example, a patternlist
+# of {fuzzcheck ~san} will match "fuzzcheck" but not "fuzzcheck-asan".
+#
 proc job_matches_any_pattern {patternlist jobcmd} {
   set bMatch 0
+  set bMiss 0
   if {[llength $patternlist]==0} {return 1}
   foreach p $patternlist {
+    if {[string index $p 0] eq "~"} {
+      set p [string range $p 1 end]
+      set not 1
+    } else {
+      set not 0
+    }
     set p [string trim $p *]
     if {[string index $p 0]=="^"} {
       set p [string range $p 1 end]
@@ -1132,10 +1331,18 @@ proc job_matches_any_pattern {patternlist jobcmd} {
     } else {
       set p "$p*"
     }
-    if {[string match $p $jobcmd]} {
-      set bMatch 1
-      break
+    if {$not} {
+      if {[string match $p $jobcmd]} {return 0}
+    } else {
+      if {[string match $p $jobcmd]} {
+        set bMatch 1
+      } else {
+        set bMiss 1
+      }
     }
+  }
+  if {!$bMiss} {
+    set bMatch 1
   }
   return $bMatch
 }
@@ -1148,7 +1355,7 @@ proc job_matches_any_pattern {patternlist jobcmd} {
 # 
 # e.g    
 #
-#    {1 /home/user/sqlite/test/testrunner_bld_xyz All-Debug}
+#    {1 /home/user/sqlite/test/testrun_xyz All-Debug}
 # 
 proc add_tcl_jobs {build config patternlist {shelldepid ""}} {
   global TRG
@@ -1158,7 +1365,7 @@ proc add_tcl_jobs {build config patternlist {shelldepid ""}} {
   set testrunner_tcl [file normalize [info script]]
 
   if {$build==""} {
-    set testfixture [info nameofexec]
+    set testfixture $TRG(interp)
   } else {
     set testfixture [file join [lindex $build 1] $TRG(testfixture)]
   }
@@ -1169,10 +1376,6 @@ proc add_tcl_jobs {build config patternlist {shelldepid ""}} {
 
   # The ::testspec array is populated by permutations.test
   foreach f [dict get $::testspec($config) -files] {
-
-    if {![job_matches_any_pattern $patternlist "$config [file tail $f]"]} {
-      continue
-    }
 
     if {[file pathtype $f]!="absolute"} { set f [file join $::testdir $f] }
     set f [file normalize $f]
@@ -1186,6 +1389,10 @@ proc add_tcl_jobs {build config patternlist {shelldepid ""}} {
     }
     if {$build!=""} {
       set displayname "[lindex $build 2] $displayname"
+    }
+
+    if {![job_matches_any_pattern $patternlist $displayname]} {
+      continue
     }
 
     set lProp [trd_test_script_properties $f]
@@ -1203,10 +1410,58 @@ proc add_tcl_jobs {build config patternlist {shelldepid ""}} {
         -cmd $cmd                      \
         -depid $depid                  \
         -priority $priority
+
   }
-  if {$ntcljob==0 && [llength $build]>0} {
-    set bldid [lindex $build 0]
-    trdb eval {DELETE FROM jobs WHERE rowid=$bldid}
+}
+
+# Add one job for each *.sql script in the test directory.  Each job runs
+# the script using the CLI:  "sqlite3 FILENAME".
+#
+# The $build argument is as for add_tcl_jobs.  If it is an empty string,
+# use the CLI in the current directory, trying to build it if it is missing.
+# Otherwise, use the CLI from that build, and depend on the placeholder job
+# "SHELL", which the caller must replace with a job that builds the CLI.
+#
+proc add_sql_jobs {build patternlist} {
+  global TRG
+
+  set topdir [file dirname $::testdir]
+  set depid ""
+  if {$build==""} {
+    set cli $TRG(shell-fullpath)
+  } else {
+    set cli [file join [lindex $build 1] $TRG(shell)]
+    set depid SHELL
+  }
+  if {[lindex $build 2]=="Valgrind"} {
+    set cli "valgrind -v --error-exitcode=1 $cli"
+  }
+
+  foreach f [lsort [glob -nocomplain -directory $::testdir *.sql]] {
+    set f [file normalize $f]
+    set displayname [string map [list $topdir/ {}] $f]
+    if {$build!=""} {
+      set displayname "[lindex $build 2] $displayname"
+    }
+
+    if {![job_matches_any_pattern $patternlist $displayname]} {
+      continue
+    }
+
+    if {$build=="" && ![file executable $TRG(shell-fullpath)]} {
+      puts "make $TRG(shell)"
+      catch {exec make $TRG(shell) >@stdout 2>@stderr}
+      if {![file executable $TRG(shell-fullpath)]} {
+        puts "Skipping *.sql tests because there is no $TRG(shell) to run them."
+        return
+      }
+    }
+
+    add_job                            \
+        -displaytype tcl               \
+        -displayname $displayname      \
+        -cmd "$cli --noinit $f .q"     \
+        -depid $depid
   }
 }
 
@@ -1214,7 +1469,9 @@ proc add_build_job {buildname target {postcmd ""} {depid ""}} {
   global TRG
 
   set dirname "[string tolower [string map {- _} $buildname]]_$target"
-  set dirname "testrunner_bld_$dirname"
+  regsub {\.exe$} $dirname {} dirname
+  regsub {\.l?o$} $dirname {obj} dirname
+  set dirname "testrun_$dirname"
 
   set cmd "$TRG(makecmd) $target"
   if {$postcmd!=""} {
@@ -1233,6 +1490,60 @@ proc add_build_job {buildname target {postcmd ""} {depid ""}} {
   ]
 
   list $id [file normalize $dirname] $buildname
+}
+
+# Add jobs to build and run all the *.c files in $testdir/c/ for build
+# configuration $buildname.
+# 
+proc add_c_jobs {buildname patternlist} {
+  global TRG
+
+  set dir [file join $::testdir c]
+
+  # One job to build the sqlite3.o file for this configuration. Each
+  # individual "c" job will copy this sqlite3.o into its working directory
+  # so that it doesn't have to build it separately every time. 
+  #
+  set obj sqlite3.o
+  if {$TRG(platform)=="win"} { set obj sqlite3.lo }
+  set B [add_build_job $buildname $obj]
+  foreach {bldid blddir dummy} $B {}
+
+  # One job for each C file.
+  #
+  foreach f [glob -nocomplain $dir/*.c] {
+    set prg [string range [file tail $f] 0 end-2]
+
+    set cmd ""
+    if {$TRG(platform)=="win"} {
+      foreach cp {sqlite3.lo *.h *.c} {
+        append cmd "copy [file nativename [file join $blddir $cp]] .\n"
+      }
+      append cmd "SET AUXTEST=$prg\n"
+      set prg "${prg}.exe"
+      append cmd "$TRG(makecmd) $prg\n"
+      append cmd ".\\$prg\n"
+    } else {
+      set cmd "set -e\n"
+      foreach cp {sqlite3.c sqlite3.h sqlite3.o .target_source src-verify} {
+        append cmd "cp [file join $blddir $cp] .\n"
+      }
+      append cmd "AUXTEST=$prg $TRG(makecmd) $prg\n"
+      append cmd "./$prg\n"
+    }
+    if {![job_matches_any_pattern $patternlist "$prg ($buildname)"]} {
+      continue
+    }
+    
+    set id [add_job                                \
+      -displaytype tcl                             \
+      -displayname "$prg ($buildname)"             \
+      -build $buildname                            \
+      -cmd  $cmd                                   \
+      -depid $bldid                                \
+      -priority 3
+    ]
+  }
 }
 
 proc add_shell_build_job {buildname dirname depid} {
@@ -1274,7 +1585,7 @@ proc add_fuzztest_jobs {buildname patternlist} {
   global env TRG
   # puts buildname=$buildname
 
-  foreach {interpreter scripts} [trd_fuzztest_data $buildname] {
+  foreach {interpreter scripts} [trd_fuzztest_data $buildname $TRG(fil-cc)] {
     set bldDone 0
     set subcmd [lrange $interpreter 1 end]
     set interpreter [lindex $interpreter 0]
@@ -1324,7 +1635,7 @@ proc add_fuzztest_jobs {buildname patternlist} {
         set tail [lrange $s 0 end-1]
         lappend tail [file tail $fname]
       }
-      if {![job_matches_any_pattern $patternlist "$interpreter $tail"]} {
+      if {![job_matches_any_pattern $patternlist "$buildname $interpreter $tail"]} {
         continue
       }
       if {!$bldDone} {
@@ -1376,6 +1687,7 @@ proc add_devtest_jobs {lBld patternlist} {
   foreach b $lBld {
     set bld [add_build_job $b $TRG(testfixture)]
     add_tcl_jobs $bld veryquick $patternlist SHELL
+    add_sql_jobs $bld $patternlist
     add_fuzztest_jobs $b $patternlist
 
     if {[trdb one "SELECT EXISTS (SELECT 1 FROM jobs WHERE depid='SHELL')"]} {
@@ -1389,14 +1701,30 @@ proc add_devtest_jobs {lBld patternlist} {
   }
 }
 
-# Check to ensure that the interpreter is a full-blown "testfixture"
-# build and not just a "tclsh".  If this is not the case, issue an
-# error message and exit.
+# Check to ensure that TRG(interp) is a full-blown "testfixture" and
+# not just a "tclsh".
+#
+# The value of TRG(interp) defaults to whatever interpreter is running
+# this script, which might be either tclsh or testfixture.  If tclsh is
+# running this script, change $TRG(interp) to be an instance of testfixture.
+# If no testfixture exists in the directory from which this script is run,
+# attempt to build one.
+#
+# Do not return unless $TRG(interp) is a valid testfixture.  If unable
+# to find and/or construct one, abort with an error message.
 #
 proc must_be_testfixture {} {
+  global TRG
   if {[lsearch [info commands] sqlite3_soft_heap_limit]<0} {
-    puts "Use testfixture, not tclsh, for these arguments."
-    exit 1
+    if {![file exec $TRG(testfixture-fullpath)]} {
+      puts "make testfixture"
+      catch {exec make testfixture >@stdout 2>@stderr}
+    }
+    if {![file exec $TRG(testfixture-fullpath)]} {
+      puts "Requires testfixture, and I was unable to build it."
+      exit 1
+    }
+    set TRG(interp) $TRG(testfixture-fullpath)
   }
 }
 
@@ -1421,6 +1749,7 @@ proc add_jobs_from_cmdline {patternlist} {
       foreach c $clist {
         add_tcl_jobs "" $c $patternlist
       }
+      add_sql_jobs "" $patternlist
     }
 
     devtest -
@@ -1449,6 +1778,7 @@ proc add_jobs_from_cmdline {patternlist} {
         foreach c [trd_configs $TRG(platform) $b] {
           add_tcl_jobs $bld $c $patternlist SHELL
         }
+        add_sql_jobs $bld $patternlist
 
         foreach e [trd_extras $TRG(platform) $b] {
           if {$e=="fuzztest"} {
@@ -1466,22 +1796,39 @@ proc add_jobs_from_cmdline {patternlist} {
             UPDATE jobs SET depid=$sbldid WHERE depid='SHELL'
           }
         }
+
+        add_c_jobs $b $patternlist
+      }
+    }
+
+    c {
+      set patternlist [lrange $patternlist 1 end]
+      foreach b [trd_builds $TRG(platform)] {
+        add_c_jobs $b $patternlist
       }
     }
 
     list {
       set allperm [array names ::testspec]
-      lappend allperm all mdevtest sdevtest release list
+      lappend allperm all devtest mdevtest sdevtest release list
       puts "Allowed values for the PERMUTATION argument: [lsort $allperm]"
       exit 0
+    }
+
+    retest {
+      # no-op
     }
 
     default {
       must_be_testfixture
       if {[info exists ::testspec($first)]} {
         add_tcl_jobs "" $first [lrange $patternlist 1 end]
+        if {$first=="veryquick" || $first=="full"} {
+          add_sql_jobs "" [lrange $patternlist 1 end]
+        }
       } else {
         add_tcl_jobs "" full $patternlist
+        add_sql_jobs "" $patternlist
       }
     }
   }
@@ -1512,6 +1859,8 @@ proc add_jobs_from_cmdline {patternlist} {
   }
 }
 
+# Initializer, or reinitialize, the testrunner.db database file.
+#
 proc make_new_testset {} {
   global TRG
 
@@ -1538,6 +1887,11 @@ proc mark_job_as_finished {jobid output state endtm} {
     if {[regexp $re $output all a b pltfm]} {
       set nerr $a
       set ntest $b
+    } elseif {[regexp {\y(\d+) tests? run with (\d+) errors?\y} $output \
+                      all b a]} {
+      # The summary line written by the CLI for *.sql test scripts
+      set nerr $a
+      set ntest $b
     }
     regexp {\ySQLite \d\d\d\d-\d\d-\d\d \d\d:\d\d:\d\d [0-9a-fA-F]+} \
          $output svers
@@ -1555,12 +1909,36 @@ proc mark_job_as_finished {jobid output state endtm} {
         SET output=$output, state=$state, endtime=$endtm, span=$endtm-starttime,
             ntest=$ntest, nerr=$nerr, svers=$svers, pltfm=$pltfm
         WHERE jobid=$jobid;
-      UPDATE jobs SET state=$childstate WHERE depid=$jobid AND state!='halt';
+      UPDATE jobs SET state=$childstate
+       WHERE depid=$jobid AND state!='halt' AND state!='done';
       UPDATE config SET value=value+$nerr WHERE name='nfail';
       UPDATE config SET value=value+$ntest WHERE name='ntest';
     }
   }
 }
+
+# We want to stop running tests.  Do this in an orderly way that
+# avoids confusing Windows.  (On unix we just invoke "exit 1".)
+#
+proc orderly_shutdown {} {
+  global tcl_platform
+  if {$tcl_platform(platform) ne "windows"} {
+    # Non-Windows platform can just call exit and the OS stops everything
+    # for us automatically.
+    exit 1
+  }
+
+  # Only windows reaches this point.  Mark pending jobs as 'halt' to prevent
+  # them from being scheduled.  Let running jobs continue to completion.
+  #
+  set n [trdb one {SELECT count(*) FROM jobs WHERE state='running'}]
+  trdb eval {UPDATE jobs SET state='halt' WHERE state in ('ready','')}
+  if {$n>1} {
+    incr n -1
+    puts "Deferred shutdown: Waiting on $n running tasks to complete."
+  }
+}
+
 
 proc script_input_ready {fd iJob jobid} {
   global TRG
@@ -1586,12 +1964,14 @@ proc script_input_ready {fd iJob jobid} {
       puts [format %-79.79s "FAILED: $job(displayname) ($iJob)"]
       set state "failed" 
       if {$TRG(stopOnError)} {
-        puts "OUTPUT: $O($iJob)"
-        exit 1
+        puts "Stopping due to errors in $job(displayname)..."
+        # puts "OUTPUT: $O($iJob)"
+        orderly_shutdown
       }
       if {$TRG(stopOnCore) && [string first {core dumped} $O($iJob)]>0} {
-        puts "OUTPUT: $O($iJob)"
-        exit 1
+        puts "Stopping due to core dump in $job(displayname)..."
+        # puts "OUTPUT: $O($iJob)"
+        orderly_shutdown
       }
     }
 
@@ -1615,7 +1995,6 @@ proc script_input_ready {fd iJob jobid} {
       append O($iJob) "$line\n"
     }
   }
-
 }
 
 proc dirname {ii} {
@@ -1627,7 +2006,7 @@ proc launch_another_job {iJob} {
   global O
   global T
 
-  set testfixture [info nameofexec]
+  set testfixture $TRG(interp)
   set script $TRG(info_script)
 
   set O($iJob) ""
@@ -1826,6 +2205,28 @@ proc run_testset {} {
      SELECT DISTINCT substr(svers,1,79) as v1 FROM jobs WHERE svers IS NOT NULL
   } {puts $v1}
 
+  return [expr {$nErr>0}]
+}
+
+# If the argument is "retest", simply rerun all tests from the previous
+# run that are marked as one of "ready", "running", "failed", or "omit"
+# plus redo any build of dependencies those tests.
+#
+proc handle_retest {} {
+  set cnt 0
+  if {[catch {trdb exists {SELECT jobid FROM jobs}} cnt] || $cnt==0} {
+    puts "No test available to rerun"
+    exit 1
+  }
+  trdb eval {UPDATE jobs SET state='ready'
+              WHERE state IN ('running','failed','omit')}
+  for {set kk 0} {$kk<2} {incr kk} {
+    trdb eval {
+      UPDATE jobs SET state='ready'
+       WHERE jobid IN (SELECT depid FROM jobs WHERE state='ready');
+      UPDATE jobs SET state='' WHERE state='ready' AND depid<>'';
+    }
+  }
 }
 
 # Handle the --buildonly option, if it was specified.
@@ -1864,17 +2265,35 @@ proc explain_tests {} {
   explain_layer "" ""
 }
 
+set exit_status 0
 sqlite3 trdb $TRG(dbname)
 trdb timeout $TRG(timeout)
-set tm [lindex [time { make_new_testset }] 0]
+if {[llength $TRG(patternlist)]==1 && $TRG(patternlist) eq "retest"} {
+  set tm 0
+  handle_retest
+} else {  
+  set tm [lindex [time { make_new_testset }] 0]
+  if {[llength $TRG(patternlist)]>0} {
+    r_write_db {
+      trdb eval {
+        DELETE FROM jobs
+         WHERE displaytype='bld'
+           AND NOT EXISTS(SELECT 1 FROM jobs chld WHERE chld.depid=jobs.jobid)
+      }
+    }
+  }
+}
 if {$TRG(explain)} {
   explain_tests
 } else {
   if {$TRG(nJob)>1} {
     puts "splitting work across $TRG(nJob) cores"
   }
-  puts "built testset in [expr $tm/1000]ms.."
+  if {$tm>0} {
+    puts "built testset in [expr $tm/1000]ms.."
+  }
   handle_buildonly
-  run_testset
+  set exit_status [run_testset]
 }
 trdb close
+exit $exit_status

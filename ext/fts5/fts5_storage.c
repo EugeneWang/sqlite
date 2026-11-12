@@ -83,9 +83,11 @@ static int fts5StorageGetStmt(
   Fts5Storage *p,                 /* Storage handle */
   int eStmt,                      /* FTS5_STMT_XXX constant */
   sqlite3_stmt **ppStmt,          /* OUT: Prepared statement handle */
-  char **pzErrMsg                 /* OUT: Error message (if any) */
+  char **pzErrMsg                 /* OUT: Error message (if any) (not used) */
 ){
   int rc = SQLITE_OK;
+
+  (void)pzErrMsg;
 
   /* If there is no %_docsize table, there should be no requests for 
   ** statements to operate on it.  */
@@ -196,19 +198,19 @@ static int fts5StorageGetStmt(
     if( zSql==0 ){
       rc = SQLITE_NOMEM;
     }else{
-      int f = SQLITE_PREPARE_PERSISTENT;
+      int f = SQLITE_PREPARE_PERSISTENT|SQLITE_PREPARE_FROM_DDL;
       if( eStmt>FTS5_STMT_LOOKUP2 ) f |= SQLITE_PREPARE_NO_VTAB;
       p->pConfig->bLock++;
       rc = sqlite3_prepare_v3(pC->db, zSql, -1, f, &p->aStmt[eStmt], 0);
       p->pConfig->bLock--;
       sqlite3_free(zSql);
-      if( rc!=SQLITE_OK && pzErrMsg ){
-        *pzErrMsg = sqlite3_mprintf("%s", sqlite3_errmsg(pC->db));
-      }
       if( rc==SQLITE_ERROR && eStmt>FTS5_STMT_LOOKUP2 && eStmt<FTS5_STMT_SCAN ){
         /* One of the internal tables - not the %_content table - is missing.
         ** This counts as a corrupted table.  */
-       rc = SQLITE_CORRUPT;
+       rc = SQLITE_CORRUPT_VTAB;
+      }else if( rc!=SQLITE_OK && p->pConfig->pzErrmsg ){
+        assert( *p->pConfig->pzErrmsg==0 );
+        *p->pConfig->pzErrmsg = sqlite3_mprintf("%s", sqlite3_errmsg(pC->db));
       }
     }
   }
@@ -262,11 +264,15 @@ int sqlite3Fts5DropAll(Fts5Config *pConfig){
         pConfig->zDb, pConfig->zName
     );
   }
-  if( rc==SQLITE_OK && pConfig->eContent==FTS5_CONTENT_NORMAL ){
-    rc = fts5ExecPrintf(pConfig->db, 0, 
-        "DROP TABLE IF EXISTS %Q.'%q_content';",
-        pConfig->zDb, pConfig->zName
-    );
+  if( rc==SQLITE_OK ){
+    if( pConfig->eContent==FTS5_CONTENT_NORMAL 
+     || pConfig->bContentlessUnindexed 
+    ){
+      rc = fts5ExecPrintf(pConfig->db, 0, 
+          "DROP TABLE IF EXISTS %Q.'%q_content';",
+          pConfig->zDb, pConfig->zName
+      );
+    }
   }
   return rc;
 }
@@ -295,7 +301,9 @@ int sqlite3Fts5StorageRename(Fts5Storage *pStorage, const char *zName){
   if( pConfig->bColumnsize ){
     fts5StorageRenameOne(pConfig, &rc, "docsize", zName);
   }
-  if( pConfig->eContent==FTS5_CONTENT_NORMAL ){
+  if( pConfig->eContent==FTS5_CONTENT_NORMAL
+   || pConfig->bContentlessUnindexed 
+  ){
     fts5StorageRenameOne(pConfig, &rc, "content", zName);
   }
   return rc;
@@ -365,34 +373,31 @@ int sqlite3Fts5StorageOpen(
     if( pConfig->eContent==FTS5_CONTENT_NORMAL 
      || pConfig->eContent==FTS5_CONTENT_UNINDEXED 
     ){
-      int nDefn = 32 + pConfig->nCol*10;
-      char *zDefn = sqlite3_malloc64(32 + (sqlite3_int64)pConfig->nCol * 20);
-      if( zDefn==0 ){
-        rc = SQLITE_NOMEM;
-      }else{
-        int i;
-        int iOff;
-        sqlite3_snprintf(nDefn, zDefn, "id INTEGER PRIMARY KEY");
-        iOff = (int)strlen(zDefn);
-        for(i=0; i<pConfig->nCol; i++){
-          if( pConfig->eContent==FTS5_CONTENT_NORMAL 
-           || pConfig->abUnindexed[i] 
-          ){
-            sqlite3_snprintf(nDefn-iOff, &zDefn[iOff], ", c%d", i);
-            iOff += (int)strlen(&zDefn[iOff]);
-          }
+      int i = 0;
+      char *zDefn = 0;
+      sqlite3_str *pDefn = sqlite3_str_new(pConfig->db);
+
+      sqlite3_str_appendf(pDefn, "id INTEGER PRIMARY KEY");
+      for(i=0; i<pConfig->nCol; i++){
+        if( pConfig->eContent==FTS5_CONTENT_NORMAL || pConfig->abUnindexed[i] ){
+          sqlite3_str_appendf(pDefn, ", c%d", i);
         }
-        if( pConfig->bLocale ){
-          for(i=0; i<pConfig->nCol; i++){
-            if( pConfig->abUnindexed[i]==0 ){
-              sqlite3_snprintf(nDefn-iOff, &zDefn[iOff], ", l%d", i);
-              iOff += (int)strlen(&zDefn[iOff]);
-            }
-          }
-        }
-        rc = sqlite3Fts5CreateTable(pConfig, "content", zDefn, 0, pzErr);
       }
-      sqlite3_free(zDefn);
+      if( pConfig->bLocale && pConfig->eContent==FTS5_CONTENT_NORMAL ){
+        for(i=0; i<pConfig->nCol; i++){
+          if( pConfig->abUnindexed[i]==0 ){
+            sqlite3_str_appendf(pDefn, ", l%d", i);
+          }
+        }
+      }
+      zDefn = sqlite3_str_finish(pDefn);
+
+      if( zDefn ){
+        rc = sqlite3Fts5CreateTable(pConfig, "content", zDefn, 0, pzErr);
+        sqlite3_free(zDefn);
+      }else{
+        rc = SQLITE_NOMEM;
+      }
     }
 
     if( rc==SQLITE_OK && pConfig->bColumnsize ){
@@ -620,75 +625,6 @@ void sqlite3Fts5StorageReleaseDeleteRow(Fts5Storage *pStorage){
 }
 
 /*
-** This function is called to process a DELETE on a contentless_delete=1
-** table. It adds the tombstone required to delete the entry with rowid 
-** iDel. If successful, SQLITE_OK is returned. Or, if an error occurs,
-** an SQLite error code.
-*/
-static int fts5StorageContentlessDelete(Fts5Storage *p, i64 iDel){
-  i64 iOrigin = 0;
-  sqlite3_stmt *pLookup = 0;
-  int rc = SQLITE_OK;
-
-  assert( p->pConfig->bContentlessDelete );
-  assert( p->pConfig->eContent==FTS5_CONTENT_NONE
-       || p->pConfig->eContent==FTS5_CONTENT_UNINDEXED
-  );
-
-  /* Look up the origin of the document in the %_docsize table. Store
-  ** this in stack variable iOrigin.  */
-  rc = fts5StorageGetStmt(p, FTS5_STMT_LOOKUP_DOCSIZE, &pLookup, 0);
-  if( rc==SQLITE_OK ){
-    sqlite3_bind_int64(pLookup, 1, iDel);
-    if( SQLITE_ROW==sqlite3_step(pLookup) ){
-      iOrigin = sqlite3_column_int64(pLookup, 1);
-    }
-    rc = sqlite3_reset(pLookup);
-  }
-
-  if( rc==SQLITE_OK && iOrigin!=0 ){
-    rc = sqlite3Fts5IndexContentlessDelete(p->pIndex, iOrigin, iDel);
-  }
-
-  return rc;
-}
-
-/*
-** Insert a record into the %_docsize table. Specifically, do:
-**
-**   INSERT OR REPLACE INTO %_docsize(id, sz) VALUES(iRowid, pBuf);
-**
-** If there is no %_docsize table (as happens if the columnsize=0 option
-** is specified when the FTS5 table is created), this function is a no-op.
-*/
-static int fts5StorageInsertDocsize(
-  Fts5Storage *p,                 /* Storage module to write to */
-  i64 iRowid,                     /* id value */
-  Fts5Buffer *pBuf                /* sz value */
-){
-  int rc = SQLITE_OK;
-  if( p->pConfig->bColumnsize ){
-    sqlite3_stmt *pReplace = 0;
-    rc = fts5StorageGetStmt(p, FTS5_STMT_REPLACE_DOCSIZE, &pReplace, 0);
-    if( rc==SQLITE_OK ){
-      sqlite3_bind_int64(pReplace, 1, iRowid);
-      if( p->pConfig->bContentlessDelete ){
-        i64 iOrigin = 0;
-        rc = sqlite3Fts5IndexGetOrigin(p->pIndex, &iOrigin);
-        sqlite3_bind_int64(pReplace, 3, iOrigin);
-      }
-    }
-    if( rc==SQLITE_OK ){
-      sqlite3_bind_blob(pReplace, 2, pBuf->p, pBuf->n, SQLITE_STATIC);
-      sqlite3_step(pReplace);
-      rc = sqlite3_reset(pReplace);
-      sqlite3_bind_null(pReplace, 2);
-    }
-  }
-  return rc;
-}
-
-/*
 ** Load the contents of the "averages" record from disk into the 
 ** p->nTotalRow and p->aTotalSize[] variables. If successful, and if
 ** argument bCache is true, set the p->bTotalsValid flag to indicate
@@ -730,6 +666,112 @@ static int fts5StorageSaveTotals(Fts5Storage *p){
   }
   sqlite3_free(buf.p);
 
+  return rc;
+}
+
+static int fts5StorageDecodeSizeArray(
+  int *aCol, int nCol,            /* Array to populate */
+  const u8 *aBlob, int nBlob      /* Record to read varints from */
+){
+  int i;
+  int iOff = 0;
+  for(i=0; i<nCol; i++){
+    if( iOff>=nBlob ) return 1;
+    iOff += fts5GetVarint32(&aBlob[iOff], aCol[i]);
+  }
+  return (iOff!=nBlob);
+}
+
+/*
+** This function is called to process a DELETE on a contentless_delete=1
+** table. It adds the tombstone required to delete the entry with rowid 
+** iDel. If successful, SQLITE_OK is returned. Or, if an error occurs,
+** an SQLite error code.
+*/
+static int fts5StorageContentlessDelete(Fts5Storage *p, i64 iDel){
+  i64 iOrigin = 0;
+  sqlite3_stmt *pLookup = 0;
+  int rc = SQLITE_OK;
+
+  assert( p->pConfig->bContentlessDelete );
+  assert( p->pConfig->eContent==FTS5_CONTENT_NONE
+       || p->pConfig->eContent==FTS5_CONTENT_UNINDEXED
+  );
+
+  rc = fts5StorageLoadTotals(p, 1);
+  if( rc!=SQLITE_OK ) return rc;
+
+  /* Look up the origin of the document in the %_docsize table. Store
+  ** this in stack variable iOrigin.  */
+  rc = fts5StorageGetStmt(p, FTS5_STMT_LOOKUP_DOCSIZE, &pLookup, 0);
+  if( rc==SQLITE_OK ){
+    int rc2;
+    sqlite3_bind_int64(pLookup, 1, iDel);
+    if( SQLITE_ROW==sqlite3_step(pLookup) ){
+      int *aCol = (int*)sqlite3_malloc64(p->pConfig->nCol * sizeof(int));
+      if( aCol==0 ){
+        rc = SQLITE_NOMEM;
+      }else{
+        const u8 *aBlob = sqlite3_column_blob(pLookup, 0);
+        int nBlob = sqlite3_column_bytes(pLookup, 0);
+        int ii;
+        if( fts5StorageDecodeSizeArray(aCol, p->pConfig->nCol, aBlob, nBlob) ){
+          rc = SQLITE_CORRUPT_VTAB;
+        }else{
+          for(ii=0; ii<p->pConfig->nCol; ii++){
+            p->aTotalSize[ii] -= aCol[ii];
+          }
+        }
+        sqlite3_free(aCol);
+      }
+      iOrigin = sqlite3_column_int64(pLookup, 1);
+    }
+    rc2 = sqlite3_reset(pLookup);
+    if( rc==SQLITE_OK ) rc = rc2;
+  }
+
+  if( rc==SQLITE_OK && iOrigin!=0 ){
+    rc = sqlite3Fts5IndexContentlessDelete(p->pIndex, iOrigin, iDel);
+    p->nTotalRow--;
+  }
+
+  return rc;
+}
+
+/*
+** Insert a record into the %_docsize table. Specifically, do:
+**
+**   INSERT OR REPLACE INTO %_docsize(id, sz) VALUES(iRowid, pBuf);
+**
+** If there is no %_docsize table (as happens if the columnsize=0 option
+** is specified when the FTS5 table is created), this function is a no-op.
+*/
+static int fts5StorageInsertDocsize(
+  Fts5Storage *p,                 /* Storage module to write to */
+  i64 iRowid,                     /* id value */
+  Fts5Buffer *pBuf                /* sz value */
+){
+  int rc = SQLITE_OK;
+  if( p->pConfig->bColumnsize ){
+    sqlite3_stmt *pReplace = 0;
+    rc = fts5StorageGetStmt(p, FTS5_STMT_REPLACE_DOCSIZE, &pReplace, 0);
+    if( rc==SQLITE_OK ){
+      sqlite3_bind_int64(pReplace, 1, iRowid);
+      if( p->pConfig->bContentlessDelete ){
+        i64 iOrigin = 0;
+        rc = sqlite3Fts5IndexGetOrigin(p->pIndex, &iOrigin);
+        sqlite3_bind_int64(pReplace, 3, iOrigin);
+      }
+    }
+    if( rc==SQLITE_OK ){
+      rc = sqlite3_bind_blob(pReplace, 2, pBuf->p, pBuf->n, SQLITE_STATIC);
+      if( rc==SQLITE_OK ){
+        sqlite3_step(pReplace);
+        rc = sqlite3_reset(pReplace);
+        sqlite3_bind_null(pReplace, 2);
+      }
+    }
+  }
   return rc;
 }
 
@@ -1113,7 +1155,9 @@ static int fts5StorageCount(Fts5Storage *p, const char *zSuffix, i64 *pnRow){
     rc = SQLITE_NOMEM;
   }else{
     sqlite3_stmt *pCnt = 0;
-    rc = sqlite3_prepare_v2(pConfig->db, zSql, -1, &pCnt, 0);
+    rc = sqlite3_prepare_v3(
+        pConfig->db, zSql, -1, SQLITE_PREPARE_FROM_DDL, &pCnt, 0
+    );
     if( rc==SQLITE_OK ){
       if( SQLITE_ROW==sqlite3_step(pCnt) ){
         *pnRow = sqlite3_column_int64(pCnt, 0);
@@ -1392,19 +1436,6 @@ void sqlite3Fts5StorageStmtRelease(
   }else{
     sqlite3_finalize(pStmt);
   }
-}
-
-static int fts5StorageDecodeSizeArray(
-  int *aCol, int nCol,            /* Array to populate */
-  const u8 *aBlob, int nBlob      /* Record to read varints from */
-){
-  int i;
-  int iOff = 0;
-  for(i=0; i<nCol; i++){
-    if( iOff>=nBlob ) return 1;
-    iOff += fts5GetVarint32(&aBlob[iOff], aCol[i]);
-  }
-  return (iOff!=nBlob);
 }
 
 /*

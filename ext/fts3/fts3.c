@@ -302,6 +302,12 @@
   SQLITE_EXTENSION_INIT1
 #endif
 
+
+/*
+** Assume any b-tree layer with more levels than this is corrupt.
+*/
+#define FTS3_MAX_BTREE_HEIGHT 48
+
 typedef struct Fts3HashWrapper Fts3HashWrapper;
 struct Fts3HashWrapper {
   Fts3Hash hash;                  /* Hash table */
@@ -890,6 +896,7 @@ static char *fts3ReadExprList(Fts3Table *p, const char *zFunc, int *pRc){
       zFunction = "";
     }else{
       zFree = zFunction = fts3QuoteId(zFunc);
+      if( zFunction==0 ) *pRc = SQLITE_NOMEM;
     }
     fts3Appendf(pRc, &zRet, "docid");
     for(i=0; i<p->nColumn; i++){
@@ -946,6 +953,7 @@ static char *fts3WriteExprList(Fts3Table *p, const char *zFunc, int *pRc){
     zFunction = "";
   }else{
     zFree = zFunction = fts3QuoteId(zFunc);
+    if( zFunction==0 ) *pRc = SQLITE_NOMEM;
   }
   fts3Appendf(pRc, &zRet, "?");
   for(i=0; i<p->nColumn; i++){
@@ -1124,7 +1132,10 @@ static int fts3ContentColumns(
     ** nul-terminator byte.  */
     nCol = sqlite3_column_count(pStmt);
     for(i=0; i<nCol; i++){
+      /* This call to sqlite3_column_name() cannot fail, as no conversion
+      ** between encodings, and therefore no malloc() call, is required. */
       const char *zCol = sqlite3_column_name(pStmt, i);
+      assert( zCol );
       nStr += strlen(zCol) + 1;
     }
 
@@ -1137,6 +1148,7 @@ static int fts3ContentColumns(
       for(i=0; i<nCol; i++){
         const char *zCol = sqlite3_column_name(pStmt, i);
         int n = (int)strlen(zCol)+1;
+        assert( zCol );           /* no malloc() required, cannot fail */
         memcpy(p, zCol, n);
         azCol[i] = p;
         p += n;
@@ -1816,9 +1828,7 @@ static int fts3CursorSeekStmt(Fts3Cursor *pCsr){
       zSql = sqlite3_mprintf("SELECT %s WHERE rowid = ?", p->zReadExprlist);
       if( !zSql ) return SQLITE_NOMEM;
       p->bLock++;
-      rc = sqlite3_prepare_v3(
-          p->db, zSql,-1,SQLITE_PREPARE_PERSISTENT,&pCsr->pStmt,0
-      );
+      rc = sqlite3Fts3PrepareStmt(p, zSql, 1, 1, &pCsr->pStmt);
       p->bLock--;
       sqlite3_free(zSql);
     }
@@ -2020,7 +2030,11 @@ static int fts3SelectLeaf(
   assert( piLeaf || piLeaf2 );
 
   fts3GetVarint32(zNode, &iHeight);
-  rc = fts3ScanInteriorNode(zTerm, nTerm, zNode, nNode, piLeaf, piLeaf2);
+  if( iHeight>FTS3_MAX_BTREE_HEIGHT ){
+    rc = FTS_CORRUPT_VTAB;
+  }else{
+    rc = fts3ScanInteriorNode(zTerm, nTerm, zNode, nNode, piLeaf, piLeaf2);
+  }
   assert_fts3_nc( !piLeaf2 || !piLeaf || rc!=SQLITE_OK || (*piLeaf<=*piLeaf2) );
 
   if( rc==SQLITE_OK && iHeight>1 ){
@@ -2065,8 +2079,13 @@ static void fts3PutDeltaVarint(
   sqlite3_int64 iVal              /* Write this value to the list */
 ){
   assert_fts3_nc( iVal-*piPrev > 0 || (*piPrev==0 && iVal==0) );
-  *pp += sqlite3Fts3PutVarint(*pp, iVal-*piPrev);
-  *piPrev = iVal;
+  if( iVal-(*piPrev)>=0 ){
+    /* Refuse to write a negative delta integer. This only happens with a 
+    ** corrupt db (see the assert above) and can cause buffer overwrites
+    ** in some cases.  */
+    *pp += sqlite3Fts3PutVarint(*pp, iVal-*piPrev);
+    *piPrev = iVal;
+  }
 }
 
 /*
@@ -3393,9 +3412,7 @@ static int fts3FilterMethod(
     }
     if( zSql ){
       p->bLock++;
-      rc = sqlite3_prepare_v3(
-          p->db,zSql,-1,SQLITE_PREPARE_PERSISTENT,&pCsr->pStmt,0
-      );
+      rc = sqlite3Fts3PrepareStmt(p, zSql, 1, 1, &pCsr->pStmt);
       p->bLock--;
       sqlite3_free(zSql);
     }else{
@@ -3708,12 +3725,13 @@ static void fts3SnippetFunc(
   int nVal,                       /* Size of apVal[] array */
   sqlite3_value **apVal           /* Array of arguments */
 ){
+  Fts3Table *pTab = 0;
   Fts3Cursor *pCsr;               /* Cursor handle passed through apVal[0] */
   const char *zStart = "<b>";
   const char *zEnd = "</b>";
   const char *zEllipsis = "<b>...</b>";
-  int iCol = -1;
-  int nToken = 15;                /* Default number of tokens in snippet */
+  i64 iCol = -1;
+  i64 nToken = 15;                /* Default number of tokens in snippet */
 
   /* There must be at least one argument passed to this function (otherwise
   ** the non-overloaded version would have been called instead of this one).
@@ -3726,11 +3744,12 @@ static void fts3SnippetFunc(
     return;
   }
   if( fts3FunctionArg(pContext, "snippet", apVal[0], &pCsr) ) return;
+  pTab = (Fts3Table *)pCsr->base.pVtab;
 
   switch( nVal ){
-    case 6: nToken = sqlite3_value_int(apVal[5]);
+    case 6: nToken = sqlite3_value_int64(apVal[5]);
             /* no break */ deliberate_fall_through
-    case 5: iCol = sqlite3_value_int(apVal[4]);
+    case 5: iCol = sqlite3_value_int64(apVal[4]);
             /* no break */ deliberate_fall_through
     case 4: zEllipsis = (const char*)sqlite3_value_text(apVal[3]);
             /* no break */ deliberate_fall_through
@@ -3740,9 +3759,12 @@ static void fts3SnippetFunc(
   }
   if( !zEllipsis || !zEnd || !zStart ){
     sqlite3_result_error_nomem(pContext);
-  }else if( nToken==0 ){
+  }else if( nToken==0 || iCol>=pTab->nColumn ){
     sqlite3_result_text(pContext, "", -1, SQLITE_STATIC);
   }else if( SQLITE_OK==fts3CursorSeek(pContext, pCsr) ){
+    if( iCol<0 ) iCol = -1;
+    if( nToken<-64 ) nToken = -64;
+    if( nToken>64 ) nToken = 64;
     sqlite3Fts3Snippet(pContext, pCsr, zStart, zEnd, zEllipsis, iCol, nToken);
   }
 }
@@ -4018,6 +4040,7 @@ static int fts3IntegrityMethod(
 
   UNUSED_PARAMETER(isQuick);
   rc = sqlite3Fts3IntegrityCheck(p, &bOk);
+  assert( pVtab->zErrMsg==0 || rc!=SQLITE_OK );
   assert( rc!=SQLITE_CORRUPT_VTAB );
   if( rc==SQLITE_ERROR || (rc&0xFF)==SQLITE_CORRUPT ){
     *pzErr = sqlite3_mprintf("unable to validate the inverted index for"
@@ -4078,7 +4101,32 @@ static void hashDestroy(void *p){
 }
 
 /*
-** The fts3 built-in tokenizers - "simple", "porter" and "icu"- are 
+** Register an SQL function that uses the tokenizer hash table pHash as its
+** user-data pointer. The new function holds a reference to the hash table,
+** which is released by hashDestroy() when the function is deleted or if
+** this call fails.
+**
+** The Fts3Hash object passed as the fifth argument must be the "hash" member
+** of an Fts3HashWrapper object. Since it is the first member of that
+** structure, the pointer may be cast to (Fts3HashWrapper*).
+*/
+int sqlite3Fts3CreateHashFunction(
+  sqlite3 *db,                    /* Database connection */
+  const char *zName,              /* Name of SQL function */
+  int nArg,                       /* Number of arguments */
+  int eTextRep,                   /* Text encoding and function flags */
+  Fts3Hash *pHash,                /* Tokenizer hash table */
+  void (*xFunc)(sqlite3_context*,int,sqlite3_value**)  /* Implementation */
+){
+  Fts3HashWrapper *pWrapper = (Fts3HashWrapper*)pHash;
+  pWrapper->nRef++;
+  return sqlite3_create_function_v2(
+      db, zName, nArg, eTextRep, (void*)pWrapper, xFunc, 0, 0, hashDestroy
+  );
+}
+
+/*
+** The fts3 built-in tokenizers - "simple", "porter" and "icu"- are
 ** implemented in files fts3_tokenizer1.c, fts3_porter.c and fts3_icu.c
 ** respectively. The following three forward declarations are for functions
 ** declared in these files used to retrieve the respective implementations.
@@ -4131,13 +4179,14 @@ int sqlite3Fts3Init(sqlite3 *db){
   sqlite3Fts3SimpleTokenizerModule(&pSimple);
   sqlite3Fts3PorterTokenizerModule(&pPorter);
 
-  /* Allocate and initialize the hash-table used to store tokenizers. */
+  /* Allocate and initialize the hash-table used to store tokenizers. The
+  ** reference held by this function is released before it returns. */
   pHash = sqlite3_malloc(sizeof(Fts3HashWrapper));
   if( !pHash ){
     rc = SQLITE_NOMEM;
   }else{
     sqlite3Fts3HashInit(&pHash->hash, FTS3_HASH_STRING, 1);
-    pHash->nRef = 0;
+    pHash->nRef = 1;
   }
 
   /* Load the built-in tokenizers into the hash table */
@@ -4188,16 +4237,23 @@ int sqlite3Fts3Init(sqlite3 *db){
       pHash->nRef++;
       rc = sqlite3Fts3InitTok(db, (void *)pHash, hashDestroy);
     }
-    return rc;
   }
 
-
-  /* An error has occurred. Delete the hash table and return the error code. */
-  assert( rc!=SQLITE_OK );
-  if( pHash ){
-    sqlite3Fts3HashClear(&pHash->hash);
-    sqlite3_free(pHash);
+  /* If an error has occurred, remove any modules and functions registered
+  ** above. If this is a loadable extension, the shared library may be unloaded
+  ** as soon as this function returns, so they must not be left in place. */
+  if( rc!=SQLITE_OK ){
+    sqlite3_create_module(db, "fts3", 0, 0);
+    sqlite3_create_module(db, "fts4", 0, 0);
+    sqlite3_create_module(db, "fts3tokenize", 0, 0);
+    sqlite3_create_module(db, "fts4aux", 0, 0);
+    sqlite3_create_function(db, "fts3_tokenizer", 1, SQLITE_UTF8, 0, 0, 0, 0);
+    sqlite3_create_function(db, "fts3_tokenizer", 2, SQLITE_UTF8, 0, 0, 0, 0);
   }
+
+  /* Release the reference held by this function. If nothing else still holds
+  ** a reference, this deletes the hash table. */
+  if( pHash ) hashDestroy(pHash);
   return rc;
 }
 
@@ -4421,6 +4477,7 @@ static int fts3EvalDeferredPhrase(Fts3Cursor *pCsr, Fts3Phrase *pPhrase){
       char *p1;
       char *p2;
       char *aOut;
+      i64 nAlloc = (i64)nPoslist*2 + FTS3_BUFFER_PADDING;
 
       if( nMaxUndeferred>iPrev ){
         p1 = aPoslist;
@@ -4432,7 +4489,7 @@ static int fts3EvalDeferredPhrase(Fts3Cursor *pCsr, Fts3Phrase *pPhrase){
         nDistance = iPrev - nMaxUndeferred;
       }
 
-      aOut = (char *)sqlite3Fts3MallocZero(((i64)nPoslist)+FTS3_BUFFER_PADDING);
+      aOut = (char *)sqlite3Fts3MallocZero(nAlloc);
       if( !aOut ){
         sqlite3_free(aPoslist);
         return SQLITE_NOMEM;

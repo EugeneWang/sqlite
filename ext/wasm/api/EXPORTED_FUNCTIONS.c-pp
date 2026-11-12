@@ -3,6 +3,11 @@ _free
 _realloc
 _sqlite3_aggregate_context
 _sqlite3_auto_extension
+_sqlite3_backup_init
+_sqlite3_backup_step
+_sqlite3_backup_finish
+_sqlite3_backup_remaining
+_sqlite3_backup_pagecount
 _sqlite3_bind_blob
 _sqlite3_bind_double
 _sqlite3_bind_int
@@ -13,6 +18,7 @@ _sqlite3_bind_parameter_index
 _sqlite3_bind_parameter_name
 _sqlite3_bind_pointer
 _sqlite3_bind_text
+_sqlite3_bind_zeroblob
 _sqlite3_busy_handler
 _sqlite3_busy_timeout
 _sqlite3_cancel_auto_extension
@@ -225,14 +231,14 @@ _sqlite3session_object_config
 _sqlite3session_patchset
 _sqlite3session_patchset_strm
 _sqlite3session_table_filter
-//#endif not bare-bones
+//#/if not bare-bones
 //#if enable-see
 _sqlite3_key
 _sqlite3_key_v2
 _sqlite3_rekey
 _sqlite3_rekey_v2
 _sqlite3_activate_see
-//#endif enable-see
+//#/if enable-see
 //#if fiddle
 _fiddle_db_arg
 _fiddle_db_filename
@@ -244,4 +250,5 @@ _fiddle_reset_db
 _fiddle_db_handle
 _fiddle_db_vfs
 _fiddle_export_db
-//#endif fiddle
+_fiddle_get_prompt
+//#/if fiddle

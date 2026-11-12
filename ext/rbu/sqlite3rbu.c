@@ -267,6 +267,7 @@ struct RbuObjIter {
   int nTblCol;                    /* Size of azTblCol[] array */
   char **azTblCol;                /* Array of unquoted target column names */
   char **azTblType;               /* Array of target column types */
+  char **azTblDflt;               /* Array of target column DEFAULT exprs */
   int *aiSrcOrder;                /* src table col -> target table col */
   u8 *abTblPk;                    /* Array of flags, set on target PK columns */
   u8 *abNotNull;                  /* Array of flags, set on NOT NULL columns */
@@ -516,16 +517,26 @@ static unsigned int rbuDeltaGetInt(const char **pz, int *pLen){
     25, 26, 27, 28, 29, 30, 31, 32,   33, 34, 35, -1, -1, -1, -1, 36,
     -1, 37, 38, 39, 40, 41, 42, 43,   44, 45, 46, 47, 48, 49, 50, 51,
     52, 53, 54, 55, 56, 57, 58, 59,   60, 61, 62, -1, -1, -1, 63, -1,
+
+    -1, -1, -1, -1, -1, -1, -1, -1,   -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,   -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,   -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,   -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,   -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,   -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,   -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,   -1, -1, -1, -1, -1, -1, -1, -1,
   };
   unsigned int v = 0;
   int c;
   unsigned char *z = (unsigned char*)*pz;
-  unsigned char *zStart = z;
-  while( (c = zValue[0x7f&*(z++)])>=0 ){
-     v = (v<<6) + c;
+  unsigned char *zEnd = z + (*pLen);
+  while( z<zEnd && (c = zValue[*z])>=0 ){
+    v = (v<<6) + c;
+    z++;
   }
-  z--;
-  *pLen -= (int)(z - zStart);
+
+  *pLen -= (int)(z - (unsigned char*)*pz);
   *pz = (char*)z;
   return v;
 }
@@ -594,21 +605,22 @@ static int rbuDeltaApply(
   int lenDelta,          /* Length of the delta */
   char *zOut             /* Write the output into this preallocated buffer */
 ){
-  unsigned int limit;
-  unsigned int total = 0;
+  sqlite3_uint64 limit;
+  sqlite3_uint64 total = 0;
 #if RBU_ENABLE_DELTA_CKSUM
   char *zOrigOut = zOut;
 #endif
 
   limit = rbuDeltaGetInt(&zDelta, &lenDelta);
-  if( *zDelta!='\n' ){
+  if( lenDelta<=0 || *zDelta!='\n' ){
     /* ERROR: size integer not terminated by "\n" */
     return -1;
   }
-  zDelta++; lenDelta--;
-  while( *zDelta && lenDelta>0 ){
+  zDelta++; lenDelta--; /* Skip the \n */
+  while( lenDelta>0 && zDelta[0] ){
     unsigned int cnt, ofst;
     cnt = rbuDeltaGetInt(&zDelta, &lenDelta);
+    if( lenDelta<=0 ) return -1;
     switch( zDelta[0] ){
       case '@': {
         zDelta++; lenDelta--;
@@ -638,7 +650,7 @@ static int rbuDeltaApply(
           /* ERROR:  insert command gives an output larger than predicted */
           return -1;
         }
-        if( (int)cnt>lenDelta ){
+        if( cnt>lenDelta ){
           /* ERROR: insert count exceeds size of delta */
           return -1;
         }
@@ -676,7 +688,7 @@ static int rbuDeltaApply(
 static int rbuDeltaOutputSize(const char *zDelta, int lenDelta){
   int size;
   size = rbuDeltaGetInt(&zDelta, &lenDelta);
-  if( *zDelta!='\n' ){
+  if( lenDelta<=0 || *zDelta!='\n' ){
     /* ERROR: size integer not terminated by "\n" */
     return -1;
   }
@@ -724,7 +736,7 @@ static void rbuFossilDeltaFunc(
     return;
   }
 
-  aOut = sqlite3_malloc(nOut+1);
+  aOut = sqlite3_malloc64((i64)nOut+1);
   if( aOut==0 ){
     sqlite3_result_error_nomem(context);
   }else{
@@ -821,10 +833,12 @@ static void rbuObjIterFreeCols(RbuObjIter *pIter){
   for(i=0; i<pIter->nTblCol; i++){
     sqlite3_free(pIter->azTblCol[i]);
     sqlite3_free(pIter->azTblType[i]);
+    sqlite3_free(pIter->azTblDflt[i]);
   }
   sqlite3_free(pIter->azTblCol);
   pIter->azTblCol = 0;
   pIter->azTblType = 0;
+  pIter->azTblDflt = 0;
   pIter->aiSrcOrder = 0;
   pIter->abTblPk = 0;
   pIter->abNotNull = 0;
@@ -1109,14 +1123,15 @@ static void *rbuMalloc(sqlite3rbu *p, sqlite3_int64 nByte){
 ** error code in the RBU handle passed as the first argument.
 */
 static void rbuAllocateIterArrays(sqlite3rbu *p, RbuObjIter *pIter, int nCol){
-  sqlite3_int64 nByte = (2*sizeof(char*) + sizeof(int) + 3*sizeof(u8)) * nCol;
+  sqlite3_int64 nByte = (3*sizeof(char*) + sizeof(int) + 3*sizeof(u8)) * nCol;
   char **azNew;
 
   azNew = (char**)rbuMalloc(p, nByte);
   if( azNew ){
     pIter->azTblCol = azNew;
     pIter->azTblType = &azNew[nCol];
-    pIter->aiSrcOrder = (int*)&pIter->azTblType[nCol];
+    pIter->azTblDflt = &azNew[nCol*2];
+    pIter->aiSrcOrder = (int*)&pIter->azTblDflt[nCol];
     pIter->abTblPk = (u8*)&pIter->aiSrcOrder[nCol];
     pIter->abNotNull = (u8*)&pIter->abTblPk[nCol];
     pIter->abIndexed = (u8*)&pIter->abNotNull[nCol];
@@ -1336,6 +1351,25 @@ static void rbuObjIterCacheIndexedCols(sqlite3rbu *p, RbuObjIter *pIter){
   if( bIndex==0 ) pIter->abIndexed = 0;
 }
 
+/*
+** Return true if table zTbl in the main database of the target is a
+** STRICT table, or false otherwise. If an error occurs, an error code
+** and message are left in the RBU handle and zero is returned.
+*/
+static int rbuTableIsStrict(sqlite3rbu *p, const char *zTbl){
+  int bStrict = 0;
+  sqlite3_stmt *pStmt = 0;
+  if( p->rc==SQLITE_OK ){
+    p->rc = prepareFreeAndCollectError(p->dbMain, &pStmt, &p->zErrmsg,
+        sqlite3_mprintf("PRAGMA main.table_list(%Q)", zTbl)
+    );
+    if( p->rc==SQLITE_OK && SQLITE_ROW==sqlite3_step(pStmt) ){
+      bStrict = sqlite3_column_int(pStmt, 5);
+    }
+    rbuFinalize(p, pStmt);
+  }
+  return bStrict;
+}
 
 /*
 ** If they are not already populated, populate the pIter->azTblCol[],
@@ -1354,6 +1388,7 @@ static int rbuObjIterCacheTableInfo(sqlite3rbu *p, RbuObjIter *pIter){
     int bRbuRowid = 0;            /* If input table has column "rbu_rowid" */
     int iOrder = 0;
     int iTnum = 0;
+    int bStrict = 0;              /* True if target is a STRICT table */
 
     /* Figure out the type of table this step will deal with. */
     assert( pIter->eType==0 );
@@ -1405,17 +1440,31 @@ static int rbuObjIterCacheTableInfo(sqlite3rbu *p, RbuObjIter *pIter){
       );
     }
 
+    bStrict = rbuTableIsStrict(p, pIter->zTbl);
+
     /* Check that all non-HIDDEN columns in the destination table are also
-    ** present in the input table. Populate the abTblPk[], azTblType[] and
-    ** aiTblOrder[] arrays at the same time.  */
+    ** present in the input table. Populate the abTblPk[], azTblType[],
+    ** azTblDflt[] and aiTblOrder[] arrays at the same time.
+    **
+    ** RBU does not support tables with GENERATED columns. If the target
+    ** table has any, return an error.  */
     if( p->rc==SQLITE_OK ){
-      p->rc = prepareFreeAndCollectError(p->dbMain, &pStmt, &p->zErrmsg, 
-          sqlite3_mprintf("PRAGMA table_info(%Q)", pIter->zTbl)
+      p->rc = prepareFreeAndCollectError(p->dbMain, &pStmt, &p->zErrmsg,
+          sqlite3_mprintf("PRAGMA table_xinfo(%Q)", pIter->zTbl)
       );
     }
     while( p->rc==SQLITE_OK && SQLITE_ROW==sqlite3_step(pStmt) ){
       const char *zName = (const char*)sqlite3_column_text(pStmt, 1);
-      if( zName==0 ) break;  /* An OOM - finalize() below returns S_NOMEM */
+      int eHidden = sqlite3_column_int(pStmt, 6);
+      if( zName==0 ) break;       /* An OOM. Bail out */
+      if( eHidden==1 ) continue;  /* Hidden column. Ignore */
+      if( eHidden!=0 ){
+        p->rc = SQLITE_ERROR;
+        p->zErrmsg = sqlite3_mprintf(
+            "generated columns not supported: %s.%s", pIter->zTbl, zName
+        );
+        break;
+      }
       for(i=iOrder; i<pIter->nTblCol; i++){
         if( 0==strcmp(zName, pIter->azTblCol[i]) ) break;
       }
@@ -1428,13 +1477,18 @@ static int rbuObjIterCacheTableInfo(sqlite3rbu *p, RbuObjIter *pIter){
         int iPk = sqlite3_column_int(pStmt, 5);
         int bNotNull = sqlite3_column_int(pStmt, 3);
         const char *zType = (const char*)sqlite3_column_text(pStmt, 2);
+        const char *zDflt = (const char*)sqlite3_column_text(pStmt, 4);
 
         if( i!=iOrder ){
           SWAP(int, pIter->aiSrcOrder[i], pIter->aiSrcOrder[iOrder]);
           SWAP(char*, pIter->azTblCol[i], pIter->azTblCol[iOrder]);
         }
 
+        /* In a STRICT table, ANY means no affinity. In the non-STRICT
+        ** imposter it would mean NUMERIC, so declare it without a type. */
+        if( bStrict && sqlite3_stricmp(zType, "ANY")==0 ) zType = "";
         pIter->azTblType[iOrder] = rbuStrndup(zType, &p->rc);
+        pIter->azTblDflt[iOrder] = rbuStrndup(zDflt, &p->rc);
         assert( iPk>=0 );
         pIter->abTblPk[iOrder] = (u8)iPk;
         pIter->abNotNull[iOrder] = (u8)bNotNull || (iPk!=0);
@@ -2157,9 +2211,11 @@ static void rbuCreateImposterTable(sqlite3rbu *p, RbuObjIter *pIter){
         ** "PRIMARY KEY" to the imposter table column declaration. */
         zPk = "PRIMARY KEY ";
       }
-      zSql = rbuMPrintf(p, "%z%s\"%w\" %s %sCOLLATE %Q%s", 
+      zSql = rbuMPrintf(p, "%z%s\"%w\" %s %sCOLLATE %Q%s%s%s", 
           zSql, zComma, zCol, pIter->azTblType[iCol], zPk, zColl,
-          (pIter->abNotNull[iCol] ? " NOT NULL" : "")
+          (pIter->abNotNull[iCol] ? " NOT NULL" : ""),
+          (pIter->azTblDflt[iCol] ? " DEFAULT " : ""),
+          (pIter->azTblDflt[iCol] ? pIter->azTblDflt[iCol] : "")
       );
       zComma = ", ";
     }
@@ -2268,9 +2324,9 @@ static char *rbuObjIterGetIndexWhere(sqlite3rbu *p, RbuObjIter *pIter){
           char c = zSql[i];
 
           /* If necessary, grow the pIter->aIdxCol[] array */
-          if( iIdxCol==nIdxAlloc ){
-            RbuSpan *aIdxCol = (RbuSpan*)sqlite3_realloc(
-                pIter->aIdxCol, (nIdxAlloc+16)*sizeof(RbuSpan)
+          if( iIdxCol>=(nIdxAlloc-1) ){
+            RbuSpan *aIdxCol = (RbuSpan*)sqlite3_realloc64(
+                pIter->aIdxCol, nIdxAlloc*sizeof(RbuSpan) + 16*sizeof(RbuSpan)
             );
             if( aIdxCol==0 ){
               rc = SQLITE_NOMEM;
@@ -2651,13 +2707,13 @@ static int rbuGetUpdateStmt(
     char *zUpdate = 0;
 
     pUp->zMask = (char*)&pUp[1];
-    memcpy(pUp->zMask, zMask, pIter->nTblCol);
     pUp->pNext = pIter->pRbuUpdate;
     pIter->pRbuUpdate = pUp;
 
     if( zSet ){
       const char *zPrefix = "";
-
+      assert( p->rc==SQLITE_OK );
+      memcpy(pUp->zMask, zMask, pIter->nTblCol);
       if( pIter->eType!=RBU_PK_VTAB ) zPrefix = "rbu_imp_";
       zUpdate = sqlite3_mprintf("UPDATE \"%s%w\" SET %s WHERE %s", 
           zPrefix, pIter->zTbl, zSet, zWhere
@@ -2747,6 +2803,9 @@ static RbuState *rbuLoadState(sqlite3rbu *p){
 
       case RBU_STATE_ROW:
         pRet->nRow = sqlite3_column_int(pStmt, 1);
+        if( pRet->nRow<0 ){
+          rc = SQLITE_CORRUPT;
+        }
         break;
 
       case RBU_STATE_PROGRESS:
@@ -2865,7 +2924,7 @@ static void rbuOpenDatabase(sqlite3rbu *p, sqlite3 *dbMain, int *pbRetry){
     p->nRbu = 0;
     p->pRbuFd = 0;
     rc = sqlite3_file_control(p->dbRbu, "main", SQLITE_FCNTL_RBUCNT, (void*)p);
-    if( rc!=SQLITE_NOTFOUND ) p->rc = rc;
+    if( rc!=SQLITE_NOTFOUND || p->pRbuFd==0 ) p->rc = rc;
     if( p->eStage>=RBU_STAGE_MOVE ){
       bOpen = 1;
     }else{
@@ -3655,7 +3714,12 @@ static void rbuCreateTargetSchema(sqlite3rbu *p){
 
   while( p->rc==SQLITE_OK && sqlite3_step(pSql)==SQLITE_ROW ){
     const char *zSql = (const char*)sqlite3_column_text(pSql, 0);
-    p->rc = sqlite3_exec(p->dbMain, zSql, 0, 0, &p->zErrmsg);
+    sqlite3_stmt *pStmt = 0;
+    p->rc = prepareAndCollectError(p->dbMain, &pStmt, &p->zErrmsg, zSql);
+    if( p->rc==SQLITE_OK ){
+      sqlite3_step(pStmt);
+      rbuFinalize(p, pStmt);
+    }
   }
   rbuFinalize(p, pSql);
   if( p->rc!=SQLITE_OK ) return;

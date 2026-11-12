@@ -81,29 +81,51 @@ for {set i 0} {$i<1000} {incr i} {
   set res [format {06:28:00.%03d} $i]
   datetest 2.2c-$i $sql $res
 }
-datetest 2.3 {date('2003-10-22','weekday 0')} 2003-10-26
-datetest 2.4 {date('2003-10-22','weekday 1')} 2003-10-27
+datetest 2.3  {date('2003-10-22','weekday 0')} 2003-10-26
+datetest 2.3b {date('2003-10-22','weekday -0')} 2003-10-19
+datetest 2.4  {date('2003-10-22','weekday 1')} 2003-10-27
 datetest 2.4a {date('2003-10-22','weekday  1')} 2003-10-27
 datetest 2.4b {date('2003-10-22','weekday  1x')} NULL
-datetest 2.4c {date('2003-10-22','weekday  -1')} NULL
-datetest 2.4d {date('2003-10-22','weakday  1x')} NULL
+datetest 2.4c {date('2003-10-22','weekday  -1')} 2003-10-20
+datetest 2.4d {date('2003-10-22','weakday  -1x')} NULL
 datetest 2.4e {date('2003-10-22','weekday ')} NULL
-datetest 2.5 {date('2003-10-22','weekday 2')} 2003-10-28
-datetest 2.6 {date('2003-10-22','weekday 3')} 2003-10-22
-datetest 2.7 {date('2003-10-22','weekday 4')} 2003-10-23
-datetest 2.8 {date('2003-10-22','weekday 5')} 2003-10-24
-datetest 2.9 {date('2003-10-22','weekday 6')} 2003-10-25
-datetest 2.10 {date('2003-10-22','weekday 7')} NULL
-datetest 2.11 {date('2003-10-22','weekday 5.5')} NULL
+datetest 2.5  {date('2003-10-22','weekday 2')} 2003-10-28
+datetest 2.5b {date('2003-10-22','weekday -2')} 2003-10-21
+datetest 2.5c {date('2003-10-23','weekday 2')} 2003-10-28
+datetest 2.5d {date('2003-10-24','weekday 2')} 2003-10-28
+datetest 2.5e {date('2003-10-25','weekday 2')} 2003-10-28
+datetest 2.5f {date('2003-10-26','weekday 2')} 2003-10-28
+datetest 2.5g {date('2003-10-27','weekday 2')} 2003-10-28
+datetest 2.5h {date('2003-10-28','weekday 2')} 2003-10-28
+datetest 2.6  {date('2003-10-22','weekday 3')} 2003-10-22
+datetest 2.6b {date('2003-10-22','weekday -3')} 2003-10-22
+datetest 2.7  {date('2003-10-22','weekday 4')} 2003-10-23
+datetest 2.7b {date('2003-10-22','weekday -4')} 2003-10-16
+datetest 2.8  {date('2003-10-22','weekday 5')} 2003-10-24
+datetest 2.8b {date('2003-10-22','weekday -5')} 2003-10-17
+datetest 2.9  {date('2003-10-22','weekday 6')} 2003-10-25
+datetest 2.9b {date('2003-10-22','weekday -6')} 2003-10-18
+datetest 2.10  {date('2003-10-22','weekday 7')} NULL
+datetest 2.10b {date('2003-10-22','weekday -7')} NULL
+datetest 2.11  {date('2003-10-22','weekday 5.5')} NULL
+datetest 2.11b {date('2003-10-22','weekday -5.5')} NULL
 datetest 2.12 {datetime('2003-10-22 12:34','weekday 0')} {2003-10-26 12:34:00}
 datetest 2.13 {datetime('2003-10-22 12:34','start of month')} \
    {2003-10-01 00:00:00}
+datetest 2.13b {datetime('2003-10-22 12:34','end of month')} \
+   {2003-10-31 23:59:59}
 datetest 2.14 {datetime('2003-10-22 12:34','start of year')} \
    {2003-01-01 00:00:00}
+datetest 2.14b {datetime('2003-10-22 12:34','end of year')} \
+   {2003-12-31 23:59:59}
 datetest 2.15 {datetime('2003-10-22 12:34','start of day')} \
    {2003-10-22 00:00:00}
-datetest 2.15a {datetime('2003-10-22 12:34','start of')} NULL
-datetest 2.15b {datetime('2003-10-22 12:34','start of bogus')} NULL
+datetest 2.15b {datetime('2003-10-22 12:34','end of day','subsec')} \
+   {2003-10-22 23:59:59.999}
+datetest 2.15c {datetime('2003-10-22 12:34','start of')} NULL
+datetest 2.15d {datetime('2003-10-22 12:34','start of bogus')} NULL
+datetest 2.15e {datetime('2003-10-22 12:34','end of')} NULL
+datetest 2.15f {datetime('2003-10-22 12:34','end of bogus')} NULL
 datetest 2.16 time('12:34:56.43') 12:34:56
 datetest 2.17 {datetime('2003-10-22 12:34','1 day')} {2003-10-23 12:34:00}
 datetest 2.18 {datetime('2003-10-22 12:34','+1 day')} {2003-10-23 12:34:00}
@@ -679,5 +701,159 @@ datetest 20.2 {datetime('2024-12-31 23:59:59.9999999999999')} \
                  {2024-12-31 23:59:59}
 datetest 20.3 {datetime('2024-12-31 23:59:59.9995')} {2024-12-31 23:59:59}
 datetest 20.4 {datetime('2024-12-31 23:59:58.9995')} {2024-12-31 23:59:58}
+
+# 2026-07-01
+# Additional tests for the new "weekday -N" and "end of ..." modifiers.
+#
+datetest 21.1  {date('2026-07-04','weekday +0')} {2026-07-05}
+datetest 21.2  {date('2026-07-05','weekday -0')} {2026-07-05}
+datetest 21.3  {date('2026-07-04','weekday -0')} {2026-06-28}
+datetest 21.4  {date('2026-07-03','weekday -0')} {2026-06-28}
+datetest 21.5  {date('2026-07-02','weekday -0')} {2026-06-28}
+datetest 21.6  {date('2026-07-01','weekday -0')} {2026-06-28}
+datetest 21.7  {date('2026-06-30','weekday -0')} {2026-06-28}
+datetest 21.8  {date('2026-06-29','weekday -0')} {2026-06-28}
+datetest 21.9  {date('2026-06-28','weekday -0')} {2026-06-28}
+datetest 21.10 {date('2026-07-05','weekday +0')} {2026-07-05}
+datetest 21.11 {date('2026-07-04','weekday +0')} {2026-07-05}
+datetest 21.12 {date('2026-07-03','weekday +0')} {2026-07-05}
+datetest 21.13 {date('2026-07-02','weekday +0')} {2026-07-05}
+datetest 21.14 {date('2026-07-01','weekday +0')} {2026-07-05}
+datetest 21.15 {date('2026-06-30','weekday +0')} {2026-07-05}
+datetest 21.16 {date('2026-06-29','weekday +0')} {2026-07-05}
+datetest 21.17 {date('2026-06-28','weekday +0')} {2026-06-28}
+datetest 22.1  {datetime('2026-02-17 12:34','end of day','subsec')} \
+               {2026-02-17 23:59:59.999}
+datetest 22.2  {datetime('2026-02-17 12:34','end of month','subsec')} \
+               {2026-02-28 23:59:59.999}
+datetest 22.3  {datetime('2024-02-17 12:34','end of month','subsec')} \
+               {2024-02-29 23:59:59.999}
+datetest 22.4  {datetime('1900-02-17 12:34','end of month','subsec')} \
+               {1900-02-28 23:59:59.999}
+datetest 22.5  {datetime('2026-12-17 12:34','end of month','subsec')} \
+               {2026-12-31 23:59:59.999}
+datetest 22.6  {datetime('2026-02-17 12:34','end of year','subsec')} \
+               {2026-12-31 23:59:59.999}
+datetest 22.7  {datetime('2026-02-17 12:34','end of time','subsec')} {NULL}
+
+# Bug 2026-09-23T02:44:48Z
+#
+# Hour field can be 24 as long as minutes and seconds are zero.
+#
+datetest 23.1 {julianday('24:00:00')} {2451545.5}
+datetest 23.2 {datetime('24:00:00')}  {2000-01-02 00:00:00}
+datetest 23.3 {julianday(datetime('24:00:00'))} {2451545.5}
+datetest 23.4 {(julianday(datetime('24:00:00'))-julianday('24:00:00'))*24} 0.0
+datetest 23.5 {datetime(datetime('24:00:00'))} {2000-01-02 00:00:00}
+set A {2000-01-01 24:00:00}
+set B {2000-01-02 00:00:00}
+datetest 23.6 {timediff('$A','$B')} {+0000-00-00 00:00:00.000}
+datetest 23.7 {datetime('$A')} {2000-01-02 00:00:00}
+datetest 23.8 {datetime('$B',timediff('$A','$B'))} {2000-01-02 00:00:00}
+set A {24:00:00}
+set B {2000-01-01 00:00:00}
+datetest 23.9 {timediff('$A','$B')} {+0000-00-01 00:00:00.000}
+datetest 23.10 {datetime('$A')} {2000-01-02 00:00:00}
+datetest 23.11 {datetime('$B',timediff('$A','$B'))} {2000-01-02 00:00:00}
+datetest 23.12 {strftime('%d/%w/%U/%W','2000-01-02 00:00:00')} {02/0/01/00}
+datetest 23.13 {strftime('%d/%w/%U/%W','2000-01-01 24:00:00')} {02/0/01/00}
+datetest 23.14 {datetime('24:01')} {NULL}
+datetest 23.15 {datetime('24:00:01')} {NULL}
+datetest 23.16 {datetime('24:00:00.001')} {NULL}
+datetest 23.17 {datetime('2024-01-31 24:00:00')} {2024-02-01 00:00:00}
+datetest 23.18 {datetime('2024-02-28 24:00:00')} {2024-02-29 00:00:00}
+datetest 23.19 {datetime('2024-02-29 24:00:00')} {2024-03-01 00:00:00}
+datetest 23.20 {datetime('2025-02-28 24:00:00')} {2025-03-01 00:00:00}
+datetest 23.21 {datetime('2024-04-30 24:00:00')} {2024-05-01 00:00:00}
+datetest 23.22 {datetime('2024-12-31 24:00:00')} {2025-01-01 00:00:00}
+# And Forum post 2026-10-17T12:57:32Z
+datetest 23.23 {datetime('-0001-12-31 24:00:00')} {0000-01-01 00:00:00}
+
+# https://sqlite.org/bugs/forumpost/7757ac1132
+#
+# A +/-HH:MM time shift of exactly 24:00 is accepted, so it shifts by one
+# whole day instead of silently doing nothing.
+#
+datetest 24.1 {datetime('2000-01-01 00:00:00','+24:00')} {2000-01-02 00:00:00}
+datetest 24.2 {datetime('2000-01-01 00:00:00','-24:00')} {1999-12-31 00:00:00}
+datetest 24.3 {datetime('2000-01-01 00:00:00','+24:00:00.000')} \
+               {2000-01-02 00:00:00}
+datetest 24.4 {datetime('2000-01-01 00:00:00','+0000-00-00 24:00')} \
+               {2000-01-02 00:00:00}
+datetest 24.5 {datetime('2000-01-01 00:00:00','-0000-00-00 24:00')} \
+               {1999-12-31 00:00:00}
+datetest 24.6 {datetime('2000-01-01 12:34:56','+24:00')} {2000-01-02 12:34:56}
+datetest 24.7 {datetime('2000-01-01 00:00:00','24:00')} {2000-01-02 00:00:00}
+datetest 24.8 {julianday('2000-01-01','+24:00')-julianday('2000-01-01','+1 day')} \
+               0.0
+datetest 24.9 {datetime('2000-01-01 00:00:00','+23:59')} {2000-01-01 23:59:00}
+datetest 24.10 {datetime('2000-01-01 00:00:00','+24:01')} {NULL}
+datetest 24.11 {datetime('2000-01-01 00:00:00','+24:00:00.5')} {NULL}
+datetest 24.12 {datetime('2024-01-31','+0000-01-00 24:00','floor')} \
+               {2024-03-01 00:00:00}
+
+# https://sqlite.org/bugs/forumpost/3cc3a0207e
+#
+# A day-of-month overflow in the input time-value is normalized in the
+# result even when a modifier such as "start of day" keeps the parsed
+# YYYY-MM-DD fields.
+#
+datetest 25.1 {date('2024-02-30','start of day')} {2024-03-01}
+datetest 25.2 {datetime('2024-02-30 10:00','start of day')} \
+               {2024-03-01 00:00:00}
+datetest 25.3 {date('2023-04-31','start of day')} {2023-05-01}
+datetest 25.4 {date('2024-02-30','subsec')} {2024-03-01}
+datetest 25.5 {datetime('2024-02-30','end of day')} {2024-03-01 23:59:59}
+datetest 25.6 {strftime('%F %j','2024-02-30','start of day')} {2024-03-01 061}
+datetest 25.7 {date('2024-02-29','start of day')} {2024-02-29}
+datetest 25.8 {date('2024-02-30')} {2024-03-01}
+datetest 25.9 {date('2024-02-30','start of day','floor')} {2024-02-29}
+
+# https://sqlite.org/bugs/forumpost/e0fe679e7c
+#
+# "floor" applies the day-of-month overflow of the preceding time-value or
+# time shift once.  A later "floor", or a modifier that moves the date to a
+# different calendar position, no longer applies that stale overflow.
+#
+datetest 26.1 {date('2024-01-31','+1 month','floor','floor')} {2024-02-29}
+datetest 26.2 {date('2024-01-31','+1 month','floor','floor','floor')} \
+               {2024-02-29}
+datetest 26.3 {date('2024-01-31','+1 month','start of month','floor')} \
+               {2024-03-01}
+datetest 26.4 {date('2024-01-31','+1 month','start of year','floor')} \
+               {2024-01-01}
+datetest 26.5 {date('2024-01-31','+1 month','end of year','floor')} \
+               {2024-12-31}
+datetest 26.6 {date('2024-01-31','+1 month','weekday 0','floor')} {2024-03-03}
+datetest 26.7 {date('2024-01-31','+1 month','+02:00','floor')} {2024-03-02}
+datetest 26.8 {date('2024-01-31','+1 month','+2 hours','floor')} {2024-03-02}
+datetest 26.9 {date('2024-02-29','+1 year','floor','floor')} {2025-02-28}
+datetest 26.10 {date('2024-02-31','floor','floor')} {2024-02-29}
+datetest 26.11 {date('2023-02-31','start of month','floor')} {2023-02-01}
+datetest 26.12 {date('2000-08-31','+0023-06-00','floor','floor')} {2024-02-29}
+datetest 26.13 {date('2024-01-31','+1 month','start of day','floor')} \
+               {2024-02-29}
+datetest 26.14 {date('2024-01-31','+1 month','subsec','floor')} {2024-02-29}
+datetest 26.15 {date('2024-01-31','+1 month','ceiling','ceiling')} {2024-03-02}
+datetest 26.16 {date('2024-01-31','+1 month','floor','ceiling')} {2024-02-29}
+datetest 26.17 {date('2024-01-31','+1 month','floor')} {2024-02-29}
+# A combined +/-YYYY-MM-DD HH:MM shift (including timediff() output) keeps
+# its own overflow for a following "floor".  Only a standalone +/-HH:MM
+# shift (signed or not) discards an earlier overflow.
+datetest 26.18 {datetime('2024-01-31','+0000-01-00 00:00','floor')} \
+               {2024-02-29 00:00:00}
+datetest 26.19 \
+   {datetime('2024-01-31',timediff('2024-02-15','2024-01-15'),'floor')} \
+   {2024-02-29 00:00:00}
+datetest 26.20 {datetime('2024-01-31 10:00','+0000-01-00 02:00','floor')} \
+               {2024-02-29 12:00:00}
+datetest 26.21 {datetime('2024-03-31','-0000-01-00 00:00','floor')} \
+               {2024-02-29 00:00:00}
+datetest 26.22 {datetime('2024-02-29','+0001-00-00 00:00','floor')} \
+               {2025-02-28 00:00:00}
+datetest 26.23 {datetime('2024-02-29','+00001-00-00 00:00:00.000','floor')} \
+               {2025-02-28 00:00:00}
+datetest 26.24 {date('2024-01-31','+1 month','-02:00','floor')} {2024-03-01}
+datetest 26.25 {date('2024-01-31','+1 month','02:00','floor')} {2024-03-02}
 
 finish_test

@@ -175,6 +175,7 @@ struct series_cursor {
   sqlite3_int64 iValue;      /* Current value */
   u8 bDesc;                  /* iStep is really negative */
   u8 bDone;                  /* True if stepped past last element */
+  u8 bLimit;                 /* There exists a limit clause */
 };
 
 /*
@@ -239,7 +240,7 @@ static int seriesConnect(
   rc = sqlite3_declare_vtab(db,
      "CREATE TABLE x(value,start hidden,stop hidden,step hidden)");
   if( rc==SQLITE_OK ){
-    pNew = *ppVtab = sqlite3_malloc( sizeof(*pNew) );
+    pNew = *ppVtab = sqlite3_malloc64( sizeof(*pNew) );
     if( pNew==0 ) return SQLITE_NOMEM;
     memset(pNew, 0, sizeof(*pNew));
     sqlite3_vtab_config(db, SQLITE_VTAB_INNOCUOUS);
@@ -261,7 +262,7 @@ static int seriesDisconnect(sqlite3_vtab *pVtab){
 static int seriesOpen(sqlite3_vtab *pUnused, sqlite3_vtab_cursor **ppCursor){
   series_cursor *pCur;
   (void)pUnused;
-  pCur = sqlite3_malloc( sizeof(*pCur) );
+  pCur = sqlite3_malloc64( sizeof(*pCur) );
   if( pCur==0 ) return SQLITE_NOMEM;
   memset(pCur, 0, sizeof(*pCur));
   *ppCursor = &pCur->base;
@@ -286,10 +287,10 @@ static int seriesNext(sqlite3_vtab_cursor *cur){
     pCur->bDone = 1;
   }else if( pCur->bDesc ){
     pCur->iValue = sub64(pCur->iValue, pCur->iStep);
-    assert( pCur->iValue>=pCur->iTerm );
+    assert( pCur->iValue>=pCur->iTerm || pCur->bLimit );
   }else{
     pCur->iValue = add64(pCur->iValue, pCur->iStep);
-    assert( pCur->iValue<=pCur->iTerm );
+    assert( pCur->iValue<=pCur->iTerm || pCur->bLimit );
   }
   return SQLITE_OK;
 }
@@ -400,6 +401,23 @@ static double seriesFloor(double r){
 }
 #endif
 
+/* Convert a floating point value to its closest integer.  Do so in
+** a way that avoids 'outside the range of representable values' warnings
+** from UBSAN.
+*/
+static sqlite3_int64 seriesRealToI64(double r){
+  if( r<-9223372036854774784.0 ) return SMALLEST_INT64;
+  if( r>+9223372036854774784.0 ) return LARGEST_INT64;
+  return (sqlite3_int64)r;
+}
+
+/* Return true if the type of the value is TEXT or BLOB.
+*/
+static int seriesIsTextOrBlob(sqlite3_value *pVal){
+  int eType = sqlite3_value_type(pVal);
+  return eType==SQLITE_TEXT || eType==SQLITE_BLOB;
+}
+
 /*
 ** This method is called to "rewind" the series_cursor object back
 ** to the first row of output.  This method is always called at least
@@ -509,20 +527,30 @@ static int seriesFilter(
     if( idxNum & 0x40 ){
       iOffset = sqlite3_value_int64(argv[iArg++]);
     }
+    if( iLimit>0 ) pCur->bLimit = 1;
   }
 
   /* Narrow the range of iMin and iMax (the minimum and maximum outputs)
   ** based on equality and inequality constraints on the "value" column.
+  **
+  ** The "value" column has no affinity, so a TEXT or BLOB operand X is
+  ** not converted into a number.  Every INTEGER is less than any TEXT
+  ** or BLOB, so "value=X", "value>X" and "value>=X" are never true and
+  ** "value<X" and "value<=X" are always true.  The type must be checked
+  ** before sqlite3_value_numeric_type(), which would convert a TEXT
+  ** value such as '3' into a number.
   */
   if( idxNum & 0x3380 ){
     if( idxNum & 0x0080 ){    /* value=X */
-      if( sqlite3_value_numeric_type(argv[iArg])==SQLITE_FLOAT ){
+      if( seriesIsTextOrBlob(argv[iArg]) ){
+        goto series_no_rows;
+      }else if( sqlite3_value_numeric_type(argv[iArg])==SQLITE_FLOAT ){
         double r = sqlite3_value_double(argv[iArg++]);
         if( r==seriesCeil(r)
          && r>=(double)SMALLEST_INT64
          && r<=(double)LARGEST_INT64
         ){
-          iMin = iMax = (sqlite3_int64)r;
+          iMin = iMax = seriesRealToI64(r);
         }else{
           goto series_no_rows;
         }
@@ -530,15 +558,21 @@ static int seriesFilter(
         iMin = iMax = sqlite3_value_int64(argv[iArg++]);
       }
     }else{
-      if( idxNum & 0x0300 ){  /* value>X or value>=X */
-        if( sqlite3_value_numeric_type(argv[iArg])==SQLITE_FLOAT ){
+      if( idxNum & 0x0300 ){  /* value>X (0x200) or value>=X (0x100) */
+        if( seriesIsTextOrBlob(argv[iArg]) ){
+          goto series_no_rows;
+        }else if( sqlite3_value_numeric_type(argv[iArg])==SQLITE_FLOAT ){
           double r = sqlite3_value_double(argv[iArg++]);
-          if( r<(double)SMALLEST_INT64 ){
+          if( r<=(double)SMALLEST_INT64 ){
             iMin = SMALLEST_INT64;
-          }else if( (idxNum & 0x0200)!=0 && r==seriesCeil(r) ){
-            iMin = (sqlite3_int64)seriesCeil(r+1.0);
+          }else if( r>(double)LARGEST_INT64 ){
+            goto series_no_rows;
           }else{
-            iMin = (sqlite3_int64)seriesCeil(r);
+            iMin = seriesRealToI64(seriesCeil(r));
+            if( (idxNum & 0x0200)!=0 && r==seriesCeil(r) ){
+              if( iMin==LARGEST_INT64 ) goto series_no_rows;
+              iMin++;
+            }
           }
         }else{
           iMin = sqlite3_value_int64(argv[iArg++]);
@@ -551,15 +585,21 @@ static int seriesFilter(
           }
         }
       }
-      if( idxNum & 0x3000 ){   /* value<X or value<=X */
-        if( sqlite3_value_numeric_type(argv[iArg])==SQLITE_FLOAT ){
+      if( idxNum & 0x3000 ){   /* value<X (0x2000) or value<=X (0x1000) */
+        if( seriesIsTextOrBlob(argv[iArg]) ){
+          iArg++;   /* No upper bound */
+        }else if( sqlite3_value_numeric_type(argv[iArg])==SQLITE_FLOAT ){
           double r = sqlite3_value_double(argv[iArg++]);
-          if( r>(double)LARGEST_INT64 ){
+          if( r>=(double)LARGEST_INT64 ){
             iMax = LARGEST_INT64;
-          }else if( (idxNum & 0x2000)!=0 && r==seriesFloor(r) ){
-            iMax = (sqlite3_int64)(r-1.0);
+          }else if( r<=(double)SMALLEST_INT64 ){
+            goto series_no_rows;
           }else{
-            iMax = (sqlite3_int64)seriesFloor(r);
+            iMax = seriesRealToI64(seriesFloor(r));
+            if( (idxNum & 0x2000)!=0 && r==seriesFloor(r) ){
+              if( iMax==SMALLEST_INT64 ) goto series_no_rows;
+              iMax--;
+            }
           }
         }else{
           iMax = sqlite3_value_int64(argv[iArg++]);
@@ -822,6 +862,25 @@ static int seriesBestIndex(
       aIdx[iCol] = i;
     }
   }
+  if( pIdxInfo->nOrderBy>=1 ){
+    int iOB = pIdxInfo->aOrderBy[0].iColumn;
+    if( iOB==SERIES_COLUMN_VALUE || iOB==SERIES_COLUMN_ROWID ){
+      /* The rowid is an alias for value, and both are unique, so the
+      ** series can be generated in the requested order regardless of any
+      ** subsequent ORDER BY terms. */
+      if( pIdxInfo->aOrderBy[0].desc ){
+        idxNum |= 0x08;
+      }else{
+        idxNum |= 0x10;
+      }
+      pIdxInfo->orderByConsumed = 1;
+    }else{
+      /* The core will sort the output, so it needs to see every row.
+      ** A LIMIT or OFFSET applied here would discard rows before the sort */
+      idxNum &= ~0x60;
+      aIdx[3] = aIdx[4] = -1;
+    }
+  }
   if( aIdx[3]==0 ){
     /* Ignore OFFSET if LIMIT is omitted */
     idxNum &= ~0x60;
@@ -857,14 +916,6 @@ static int seriesBestIndex(
     ** the preferred case */
     pIdxInfo->estimatedCost = (double)(2 - ((idxNum&4)!=0));
     pIdxInfo->estimatedRows = 1000;
-    if( pIdxInfo->nOrderBy>=1 && pIdxInfo->aOrderBy[0].iColumn==0 ){
-      if( pIdxInfo->aOrderBy[0].desc ){
-        idxNum |= 0x08;
-      }else{
-        idxNum |= 0x10;
-      }
-      pIdxInfo->orderByConsumed = 1;
-    }
   }else if( (idxNum & 0x21)==0x21 ){
     /* We have start= and LIMIT */
     pIdxInfo->estimatedRows = 2500;

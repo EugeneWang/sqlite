@@ -99,6 +99,18 @@ typedef struct PGroup PGroup;
 ** object is positioned immediately after the page buffer to serve as an
 ** overrun area, so that overreads are harmless.
 **
+** Under some circumstances, using a strategically corrupt db file, one
+** or two varints may be read from past the end of the page buffer and
+** returned to the user (as rowid values). For this reason, we ensure that
+** the first few elements of PgHdr1 are not pointers. If they were, then
+** a determined attacker might be able to read the value of the pointer,
+** which can be used as part of a larger exploit. Furthermore, because the
+** first two elements of PgHdr1 are isBulkLocal and isAnchor - u16 variables
+** that always contain either 1 or 0 - the PgHdr1 structure always begins
+** with 4 bytes with the high-bit cleared, and so code attempting to read
+** varints can never progress past this point and read any more sensitive
+** information further inside the structure.
+**
 ** Variables isBulkLocal and isAnchor were once type "u8". That works,
 ** but causes a 2-byte gap in the structure for most architectures (since
 ** pointers must be either 4 or 8-byte aligned). As this structure is located
@@ -107,7 +119,10 @@ typedef struct PGroup PGroup;
 ** read part of this structure before the corruption is detected. This
 ** can cause a valgrind error if the uninitialized gap is accessed. Using u16
 ** ensures there is no such gap, and therefore no bytes of uninitialized
-** memory in the structure.
+** memory in the structure. Keeping the u16 type also lets isBulkLocal,
+** isAnchor and iKey fill exactly the 8 bytes (2+2+4) that precede the
+** 8-byte-aligned "page" member, so no uninitialized padding is exposed to
+** an overread.
 **
 ** The pLruNext and pLruPrev pointers form a double-linked circular list
 ** of all pages that are unpinned.  The PGroup.lru element (which should be
@@ -115,16 +130,29 @@ typedef struct PGroup PGroup;
 ** beginning and the end of the list.
 */
 struct PgHdr1 {
-  sqlite3_pcache_page page; /* Base class. Must be first. pBuf & pExtra */
-  unsigned int iKey;        /* Key value (page number) */
   u16 isBulkLocal;          /* This page from bulk local storage */
   u16 isAnchor;             /* This is the PGroup.lru element */
+  unsigned int iKey;        /* Key value (page number) */
+  sqlite3_pcache_page page; /* Base class. pBuf & pExtra. Deliberately not the
+                            ** first member - see the note above. */
   PgHdr1 *pNext;            /* Next in hash table chain */
   PCache1 *pCache;          /* Cache that currently owns this page */
   PgHdr1 *pLruNext;         /* Next in circular LRU list of unpinned pages */
   PgHdr1 *pLruPrev;         /* Previous in LRU list of unpinned pages */
                             /* NB: pLruPrev is only valid if pLruNext!=0 */
 };
+
+/*
+** Given the sqlite3_pcache_page object handed out to the pcache.c layer,
+** recover the PgHdr1 that contains it. PgHdr1.page is no longer required to
+** be the first member of PgHdr1, so this goes through the "page" member
+** rather than casting the structure pointer. The fetch methods produce the
+** other direction directly with &pPage->page, only on paths where pPage is
+** known to be non-NULL. PAGE_TO_PGHDR1() is likewise only ever given a
+** non-NULL page that this module previously handed out.
+*/
+#define PAGE_TO_PGHDR1(pPg) \
+  ((PgHdr1*)(((char*)(pPg)) - offsetof(PgHdr1,page)))
 
 /*
 ** A page is pinned if it is not on the LRU list.  To be "pinned" means
@@ -309,22 +337,24 @@ static int pcache1InitBulk(PCache1 *pCache){
   if( szBulk > pCache->szAlloc*(i64)pCache->nMax ){
     szBulk = pCache->szAlloc*(i64)pCache->nMax;
   }
-  zBulk = pCache->pBulk = sqlite3Malloc( szBulk );
-  sqlite3EndBenignMalloc();
-  if( zBulk ){
-    int nBulk = sqlite3MallocSize(zBulk)/pCache->szAlloc;
-    do{
-      PgHdr1 *pX = (PgHdr1*)&zBulk[pCache->szPage];
-      pX->page.pBuf = zBulk;
-      pX->page.pExtra = (u8*)pX + ROUND8(sizeof(*pX));
-      assert( EIGHT_BYTE_ALIGNMENT( pX->page.pExtra ) );
-      pX->isBulkLocal = 1;
-      pX->isAnchor = 0;
-      pX->pNext = pCache->pFree;
-      pX->pLruPrev = 0;           /* Initializing this saves a valgrind error */
-      pCache->pFree = pX;
-      zBulk += pCache->szAlloc;
-    }while( --nBulk );
+  if( szBulk>=pCache->szAlloc ){
+    zBulk = pCache->pBulk = sqlite3Malloc( szBulk );
+    sqlite3EndBenignMalloc();
+    if( zBulk ){
+      int nBulk = sqlite3MallocSize(zBulk)/pCache->szAlloc;
+      do{
+        PgHdr1 *pX = (PgHdr1*)&zBulk[pCache->szPage];
+        pX->page.pBuf = zBulk;
+        pX->page.pExtra = (u8*)pX + ROUND8(sizeof(*pX));
+        assert( EIGHT_BYTE_ALIGNMENT( pX->page.pExtra ) );
+        pX->isBulkLocal = 1;
+        pX->isAnchor = 0;
+        pX->pNext = pCache->pFree;
+        pX->pLruPrev = 0;    /* Initializing this saves a valgrind error */
+        pCache->pFree = pX;
+        zBulk += pCache->szAlloc;
+      }while( --nBulk );
+    }
   }
   return pCache->pFree!=0;
 }
@@ -543,6 +573,7 @@ static void pcache1ResizeHash(PCache1 *p){
   if( nNew<256 ){
     nNew = 256;
   }
+  assert( (nNew & (nNew-1))==0 );   /* nNew is always a power of two */
 
   pcache1LeaveMutex(p->pGroup);
   if( p->nHash ){ sqlite3BeginBenignMalloc(); }
@@ -554,7 +585,7 @@ static void pcache1ResizeHash(PCache1 *p){
       PgHdr1 *pPage;
       PgHdr1 *pNext = p->apHash[i];
       while( (pPage = pNext)!=0 ){
-        unsigned int h = pPage->iKey % nNew;
+        unsigned int h = (unsigned int)(pPage->iKey & (nNew-1));
         pNext = pPage->pNext;
         pPage->pNext = apNew[h];
         apNew[h] = pPage;
@@ -573,7 +604,7 @@ static void pcache1ResizeHash(PCache1 *p){
 **
 ** The PGroup mutex must be held when this function is called.
 */
-static PgHdr1 *pcache1PinPage(PgHdr1 *pPage){
+static sqlite3_pcache_page *pcache1PinPage(PgHdr1 *pPage){
   assert( pPage!=0 );
   assert( PAGE_IS_UNPINNED(pPage) );
   assert( pPage->pLruNext );
@@ -587,7 +618,7 @@ static PgHdr1 *pcache1PinPage(PgHdr1 *pPage){
   assert( pPage->isAnchor==0 );
   assert( pPage->pCache->pGroup->lru.isAnchor==1 );
   pPage->pCache->nRecyclable--;
-  return pPage;
+  return &pPage->page;
 }
 
 
@@ -604,7 +635,8 @@ static void pcache1RemoveFromHash(PgHdr1 *pPage, int freeFlag){
   PgHdr1 **pp;
 
   assert( sqlite3_mutex_held(pCache->pGroup->mutex) );
-  h = pPage->iKey % pCache->nHash;
+  assert( pCache->nHash>0 && (pCache->nHash & (pCache->nHash-1))==0 );
+  h = pPage->iKey & (pCache->nHash-1);
   for(pp=&pCache->apHash[h]; (*pp)!=pPage; pp=&(*pp)->pNext);
   *pp = (*pp)->pNext;
 
@@ -649,14 +681,14 @@ static void pcache1TruncateUnsafe(
   unsigned int h, iStop;
   assert( sqlite3_mutex_held(pCache->pGroup->mutex) );
   assert( pCache->iMaxKey >= iLimit );
-  assert( pCache->nHash > 0 );
+  assert( pCache->nHash>0 && (pCache->nHash & (pCache->nHash-1))==0 );
   if( pCache->iMaxKey - iLimit < pCache->nHash ){
     /* If we are just shaving the last few pages off the end of the
     ** cache, then there is no point in scanning the entire hash table.
     ** Only scan those hash slots that might contain pages that need to
     ** be removed. */
-    h = iLimit % pCache->nHash;
-    iStop = pCache->iMaxKey % pCache->nHash;
+    h = iLimit & (pCache->nHash-1);
+    iStop = pCache->iMaxKey & (pCache->nHash-1);
     TESTONLY( nPage = -10; )  /* Disable the pCache->nPage validity check */
   }else{
     /* This is the general case where many pages are being removed.
@@ -681,7 +713,7 @@ static void pcache1TruncateUnsafe(
       }
     }
     if( h==iStop ) break;
-    h = (h+1) % pCache->nHash;
+    h = (h+1) & (pCache->nHash-1);
   }
   assert( nPage<0 || pCache->nPage==(unsigned)nPage );
 }
@@ -869,7 +901,7 @@ static int pcache1Pagecount(sqlite3_pcache *p){
 ** usually not needed, and by avoiding the stack initialization required
 ** for these steps, the main pcache1Fetch() procedure can run faster.
 */
-static SQLITE_NOINLINE PgHdr1 *pcache1FetchStage2(
+static SQLITE_NOINLINE sqlite3_pcache_page *pcache1FetchStage2(
   PCache1 *pCache,
   unsigned int iKey,
   int createFlag
@@ -893,6 +925,7 @@ static SQLITE_NOINLINE PgHdr1 *pcache1FetchStage2(
 
   if( pCache->nPage>=pCache->nHash ) pcache1ResizeHash(pCache);
   assert( pCache->nHash>0 && pCache->apHash );
+  assert( (pCache->nHash & (pCache->nHash-1))==0 );
 
   /* Step 4. Try to recycle a page. */
   if( pCache->bPurgeable
@@ -921,7 +954,7 @@ static SQLITE_NOINLINE PgHdr1 *pcache1FetchStage2(
   }
 
   if( pPage ){
-    unsigned int h = iKey % pCache->nHash;
+    unsigned int h = iKey & (pCache->nHash-1);
     pCache->nPage++;
     pPage->iKey = iKey;
     pPage->pNext = pCache->apHash[h];
@@ -934,8 +967,9 @@ static SQLITE_NOINLINE PgHdr1 *pcache1FetchStage2(
     if( iKey>pCache->iMaxKey ){
       pCache->iMaxKey = iKey;
     }
+    return &pPage->page;
   }
-  return pPage;
+  return 0;
 }
 
 /*
@@ -997,7 +1031,7 @@ static SQLITE_NOINLINE PgHdr1 *pcache1FetchStage2(
 ** the common case where pGroup->mutex is NULL.  The pcache1Fetch() wrapper
 ** invokes the appropriate routine.
 */
-static PgHdr1 *pcache1FetchNoMutex(
+static sqlite3_pcache_page *pcache1FetchNoMutex(
   sqlite3_pcache *p,
   unsigned int iKey,
   int createFlag
@@ -1005,8 +1039,11 @@ static PgHdr1 *pcache1FetchNoMutex(
   PCache1 *pCache = (PCache1 *)p;
   PgHdr1 *pPage = 0;
 
-  /* Step 1: Search the hash table for an existing entry. */
-  pPage = pCache->apHash[iKey % pCache->nHash];
+  /* Step 1: Search the hash table for an existing entry.  nHash is always
+  ** a power of two when the cache is in use (see pcache1ResizeHash()), so
+  ** the modulo reduces to a mask, avoiding a hardware divide. */
+  assert( pCache->nHash>0 && (pCache->nHash & (pCache->nHash-1))==0 );
+  pPage = pCache->apHash[iKey & (pCache->nHash-1u)];
   while( pPage && pPage->iKey!=iKey ){ pPage = pPage->pNext; }
 
   /* Step 2: If the page was found in the hash table, then return it.
@@ -1017,7 +1054,7 @@ static PgHdr1 *pcache1FetchNoMutex(
     if( PAGE_IS_UNPINNED(pPage) ){
       return pcache1PinPage(pPage);
     }else{
-      return pPage;
+      return &pPage->page;
     }
   }else if( createFlag ){
     /* Steps 3, 4, and 5 implemented by this subroutine */
@@ -1027,13 +1064,13 @@ static PgHdr1 *pcache1FetchNoMutex(
   }
 }
 #if PCACHE1_MIGHT_USE_GROUP_MUTEX
-static PgHdr1 *pcache1FetchWithMutex(
+static sqlite3_pcache_page *pcache1FetchWithMutex(
   sqlite3_pcache *p,
   unsigned int iKey,
   int createFlag
 ){
   PCache1 *pCache = (PCache1 *)p;
-  PgHdr1 *pPage;
+  sqlite3_pcache_page *pPage;
 
   pcache1EnterMutex(pCache->pGroup);
   pPage = pcache1FetchNoMutex(p, iKey, createFlag);
@@ -1051,7 +1088,6 @@ static sqlite3_pcache_page *pcache1Fetch(
   PCache1 *pCache = (PCache1 *)p;
 #endif
 
-  assert( offsetof(PgHdr1,page)==0 );
   assert( pCache->bPurgeable || createFlag!=1 );
   assert( pCache->bPurgeable || pCache->nMin==0 );
   assert( pCache->bPurgeable==0 || pCache->nMin==10 );
@@ -1059,11 +1095,11 @@ static sqlite3_pcache_page *pcache1Fetch(
   assert( pCache->nHash>0 );
 #if PCACHE1_MIGHT_USE_GROUP_MUTEX
   if( pCache->pGroup->mutex ){
-    return (sqlite3_pcache_page*)pcache1FetchWithMutex(p, iKey, createFlag);
+    return pcache1FetchWithMutex(p, iKey, createFlag);
   }else
 #endif
   {
-    return (sqlite3_pcache_page*)pcache1FetchNoMutex(p, iKey, createFlag);
+    return pcache1FetchNoMutex(p, iKey, createFlag);
   }
 }
 
@@ -1079,7 +1115,7 @@ static void pcache1Unpin(
   int reuseUnlikely
 ){
   PCache1 *pCache = (PCache1 *)p;
-  PgHdr1 *pPage = (PgHdr1 *)pPg;
+  PgHdr1 *pPage = PAGE_TO_PGHDR1(pPg);
   PGroup *pGroup = pCache->pGroup;
 
   assert( pPage->pCache==pCache );
@@ -1115,7 +1151,7 @@ static void pcache1Rekey(
   unsigned int iNew
 ){
   PCache1 *pCache = (PCache1 *)p;
-  PgHdr1 *pPage = (PgHdr1 *)pPg;
+  PgHdr1 *pPage = PAGE_TO_PGHDR1(pPg);
   PgHdr1 **pp;
   unsigned int hOld, hNew;
   assert( pPage->iKey==iOld );
@@ -1124,8 +1160,9 @@ static void pcache1Rekey(
 
   pcache1EnterMutex(pCache->pGroup);
 
-  assert( pcache1FetchNoMutex(p, iOld, 0)==pPage ); /* pPg really is iOld */
-  hOld = iOld%pCache->nHash;
+  assert( pcache1FetchNoMutex(p, iOld, 0)==&pPage->page ); /* pPg really iOld */
+  assert( pCache->nHash>0 && (pCache->nHash & (pCache->nHash-1))==0 );
+  hOld = iOld & (pCache->nHash-1);
   pp = &pCache->apHash[hOld];
   while( (*pp)!=pPage ){
     pp = &(*pp)->pNext;
@@ -1133,7 +1170,7 @@ static void pcache1Rekey(
   *pp = pPage->pNext;
 
   assert( pcache1FetchNoMutex(p, iNew, 0)==0 ); /* iNew not in cache */
-  hNew = iNew%pCache->nHash;
+  hNew = iNew & (pCache->nHash-1);
   pPage->iKey = iNew;
   pPage->pNext = pCache->apHash[hNew];
   pCache->apHash[hNew] = pPage;

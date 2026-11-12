@@ -78,7 +78,7 @@ static u8 getSafetyLevel(const char *z, int omitFull, u8 dflt){
                             /* on no off false yes true extra full */
   int i, n;
   if( sqlite3Isdigit(*z) ){
-    return (u8)sqlite3Atoi(z);
+    return sqlite3Atoi(z)!=0;
   }
   n = sqlite3Strlen30(z);
   for(i=0; i<ArraySize(iLength); i++){
@@ -215,7 +215,7 @@ static void setPragmaResultColumnNames(
 ** Generate code to return a single integer value.
 */
 static void returnSingleInt(Vdbe *v, i64 value){
-  sqlite3VdbeAddOp4Dup8(v, OP_Int64, 0, 1, 0, (const u8*)&value, P4_INT64);
+  sqlite3VdbeAddInt64(v, 1, value);
   sqlite3VdbeAddOp2(v, OP_ResultRow, 1, 1);
 }
 
@@ -1137,7 +1137,13 @@ void sqlite3Pragma(
         sqlite3ErrorMsg(pParse,
             "Safety level may not be changed inside a transaction");
       }else if( iDb!=1 ){
-        int iLevel = (getSafetyLevel(zRight,0,1)+1) & PAGER_SYNCHRONOUS_MASK;
+        int iLevel;
+        if( sqlite3Isdigit(zRight[0]) ){
+          iLevel = sqlite3Atoi(zRight);
+        }else{
+          iLevel = getSafetyLevel(zRight,0,1);
+        }
+        iLevel = (iLevel+1) & PAGER_SYNCHRONOUS_MASK;
         if( iLevel==0 ) iLevel = 1;
         pDb->safety_level = iLevel;
         pDb->bSyncSet = 1;
@@ -1751,10 +1757,9 @@ void sqlite3Pragma(
       for(cnt=0, x=sqliteHashFirst(pTbls); x; x=sqliteHashNext(x)){
         Table *pTab = sqliteHashData(x);  /* Current table */
         Index *pIdx;                      /* An index on pTab */
-        int nIdx;                         /* Number of indexes on pTab */
         if( tableSkipIntegrityCheck(pTab,pObjTab) ) continue;
         if( HasRowid(pTab) ) cnt++;
-        for(nIdx=0, pIdx=pTab->pIndex; pIdx; pIdx=pIdx->pNext, nIdx++){ cnt++; }
+        for(pIdx=pTab->pIndex; pIdx; pIdx=pIdx->pNext){ cnt++; }
       }
       if( cnt==0 ) continue;
       if( pObjTab ) cnt++;
@@ -1845,14 +1850,9 @@ void sqlite3Pragma(
         sqlite3OpenTableAndIndices(pParse, pTab, OP_OpenRead, 0,
                                    1, 0, &iDataCur, &iIdxCur);
         /* reg[7] counts the number of entries in the table.
-        ** reg[8+i] counts the number of entries in the i-th index
         */
         sqlite3VdbeAddOp2(v, OP_Integer, 0, 7);
-        for(j=0, pIdx=pTab->pIndex; pIdx; pIdx=pIdx->pNext, j++){
-          sqlite3VdbeAddOp2(v, OP_Integer, 0, 8+j); /* index entries counter */
-        }
-        assert( pParse->nMem>=8+j );
-        assert( sqlite3NoTempsInRange(pParse,1,7+j) );
+        assert( sqlite3NoTempsInRange(pParse,1,7) );
         sqlite3VdbeAddOp2(v, OP_Rewind, iDataCur, 0); VdbeCoverage(v);
         loopTop = sqlite3VdbeAddOp2(v, OP_AddImm, 7, 1);
 
@@ -1934,8 +1934,8 @@ void sqlite3Pragma(
           }else{
             if( pCol->iDflt ){
               sqlite3_value *pDfltValue = 0;
-              sqlite3ValueFromExpr(db, sqlite3ColumnExpr(pTab,pCol), ENC(db),
-                                   pCol->affinity, &pDfltValue);
+              sqlite3ValueFromExpr(db, sqlite3ColumnExprAuth(pTab,pCol,pParse),
+                                   ENC(db), pCol->affinity, &pDfltValue);
               if( pDfltValue ){
                 p4 = sqlite3_value_type(pDfltValue);
                 sqlite3ValueFree(pDfltValue);
@@ -2065,10 +2065,21 @@ void sqlite3Pragma(
             r1 = sqlite3GenerateIndexKey(pParse, pIdx, iDataCur, 0, 0, &jmp3,
                                          pPrior, r1);
             pPrior = pIdx;
-            sqlite3VdbeAddOp2(v, OP_AddImm, 8+j, 1);/* increment entry count */
             /* Verify that an index entry exists for the current table row */
-            jmp2 = sqlite3VdbeAddOp4Int(v, OP_Found, iIdxCur+j, ckUniq, r1,
+            sqlite3VdbeAddOp4Int(v, OP_Found, iIdxCur+j, ckUniq, r1,
                                         pIdx->nColumn); VdbeCoverage(v);
+            jmp2 = sqlite3VdbeAddOp3(v, OP_IFindKey, iIdxCur+j, ckUniq, r1); 
+            VdbeCoverage(v);
+            sqlite3VdbeChangeP4(v, -1, (const char*)pIdx, P4_INDEX);
+            sqlite3VdbeAddOp4(v, OP_String8, 0, 3, 0,
+              sqlite3MPrintf(db, "index %s stores an imprecise floating-point "
+                                 "value for row ", pIdx->zName),
+              P4_DYNAMIC);
+            sqlite3VdbeAddOp3(v, OP_Concat, 7, 3, 3);
+            integrityCheckResultRow(v);
+            sqlite3VdbeAddOp2(v, OP_Goto, 0, ckUniq);
+
+            sqlite3VdbeJumpHere(v, jmp2);
             sqlite3VdbeLoadString(v, 3, "row ");
             sqlite3VdbeAddOp3(v, OP_Concat, 7, 3, 3);
             sqlite3VdbeLoadString(v, 4, " missing from index ");
@@ -2076,7 +2087,7 @@ void sqlite3Pragma(
             jmp5 = sqlite3VdbeLoadString(v, 4, pIdx->zName);
             sqlite3VdbeAddOp3(v, OP_Concat, 4, 3, 3);
             jmp4 = integrityCheckResultRow(v);
-            sqlite3VdbeJumpHere(v, jmp2);
+            sqlite3VdbeResolveLabel(v, ckUniq);
 
             /* The OP_IdxRowid opcode is an optimized version of OP_Column
             ** that extracts the rowid off the end of the index record.
@@ -2637,9 +2648,10 @@ void sqlite3Pragma(
   ** disables the timeout.
   */
   /*case PragTyp_BUSY_TIMEOUT*/ default: {
+    int n = 0;
     assert( pPragma->ePragTyp==PragTyp_BUSY_TIMEOUT );
-    if( zRight ){
-      sqlite3_busy_timeout(db, sqlite3Atoi(zRight));
+    if( zRight && sqlite3GetInt32(zRight,&n) ){
+      sqlite3_busy_timeout(db, n);
     }
     returnSingleInt(v, db->busyTimeout);
     break;

@@ -14,12 +14,14 @@
    itself. i.e. try to keep file-local symbol names obnoxiously
    collision-resistant.
 */
+//#@ policy error
+//#define canonical-sqlite3
 /**
    This file was preprocessed using:
 
-//#@policy error
+//#@ policy error <<
    @c-pp::argv@
-//#@policy off
+//#/@
 */
 //#if unsupported-build
 /**
@@ -27,10 +29,14 @@
 
    This SQLite JS build configuration is entirely unsupported! It has
    not been tested beyond the ability to compile it. It may not
-   load. It may not work properly. Only builds targeting browser
-   environments are supported and tested.
+   load. It may not work properly. Only builds _directly_ targeting
+   browser environments ("vanilla" JS and ESM modules) are supported
+   and tested. Builds which _indirectly_ target browsers (namely
+   bundler-friendly builds and any node builds) are not supported
+   deliverables.
 */
-//#endif
+//#/if
+//#if not target:es6-bundler-friendly and not target:node
 (function(Module){
   const sIMS =
         globalThis.sqlite3InitModuleState/*from extern-post-js.c-pp.js*/
@@ -52,7 +58,8 @@
      Worker constructor or importScripts() to be able to resolve
      foo/bar/X.wasm (in the latter case, with some help):
 
-     1) If URL param named the same as `path` is set, it is returned.
+     1) If URL param named the same as `path` is set and it looks like
+     a local path reference, it is returned.
 
      2) If sqlite3InitModuleState.sqlite3Dir is set, then (thatName + path)
      is returned (it's assumed to end with '/').
@@ -68,32 +75,42 @@
      approach.
   */
   Module['locateFile'] = function(path, prefix) {
+    if( this.emscriptenLocateFile instanceof Function ){
+      /* [tag:locateFile] Client-overridden impl. We do not support
+         this but offer it as a back-door which will go away the
+         moment either Emscripten changes that interface or we manage
+         to get non-Emscripten builds working.
+         https://sqlite.org/forum/forumpost/1eec339854c935bd
+
+         See extern-post-js.c-pp.js [tag:locateFile].
+      */
+      return this.emscriptenLocateFile(path, prefix);
+    }
 //#if target:es6-module
     return new URL(path, import.meta.url).href;
 //#else
     'use strict';
-    let theFile;
-    const up = this.urlParams;
-    if(up.has(path)){
-      theFile = up.get(path);
-    }else if(this.sqlite3Dir){
-      theFile = this.sqlite3Dir + path;
-    }else if(this.scriptDir){
-      theFile = this.scriptDir + path;
-    }else{
-      theFile = prefix + path;
+    let theFile = this.getPathArgument(path);
+    if( !theFile ){
+      if(this.sqlite3Dir){
+        theFile = this.sqlite3Dir + path;
+      }else if(this.scriptDir){
+        theFile = this.scriptDir + path;
+      }else{
+        theFile = prefix + path;
+      }
     }
     this.debugModule(
       "locateFile(",arguments[0], ',', arguments[1],")",
       'sqlite3InitModuleState.scriptDir =',this.scriptDir,
-      'up.entries() =',Array.from(up.entries()),
+      'urlParams.entries() =',Array.from(this.urlParams.entries()),
       "result =", theFile
     );
     return theFile;
-//#endif target:es6-module
+//#/if target:es6-module
   }.bind(sIMS);
 
-//#if Module.instantiateWasm and not wasmfs
+//#if Module.instantiateWasm and not wasmfs and not target:node
   /**
      Override Module.instantiateWasm().
 
@@ -102,9 +119,53 @@
      https://github.com/emscripten-core/emscripten/issues/17951
 
      In such builds we must disable this.
+
+     It's disabled in the (unsupported/untested) node builds because
+     node does not do fetch().
   */
-  Module['instantiateWasm'] = function callee(imports,onSuccess){
+  Module['instantiateWasm'] = function callee(imports, onSuccess){
+    if( this.emscriptenInstantiateWasm instanceof Function ){
+      /* See [tag:locateFile]. Same story here */
+      return this.emscriptenInstantiateWasm(imports, onSuccess);
+    }
     const sims = this;
+    const finalThen = (arg)=>{
+      arg.imports = imports;
+      sims.instantiateWasm = arg; /* used by sqlite3-api-prologue.c-pp.js */
+      onSuccess(arg.instance, arg.module);
+    };
+//#if 0
+/*
+  The following block uses //% as a preprocessor directive delimiter
+  and is replaced in a second preprocessor pass after compilation of
+  sqlite3.js.  It implements two ways to reach the WASM file:
+  embedding it inline as a base64 blob or via a URL. The base64
+  approach results in massive memory spikes when the module loads, as
+  it needs to have the base64, the decoded base64, and the whole
+  resulting compiled WASM binary in memory at once.  Loading from a
+  URL allows streaming, such that the compiler can discard the pieces
+  of the input it has already processed. i.e. don't embed as
+  base64. It's interesting but severely memory-costly.
+*/
+//#/if
+//%define ? base64.wasm 0
+//%if base64.wasm and defined sqlite3.wasm.base64
+//%@ push policy error delimiter '<<<' '>>>'
+    let b64Wasm = `<<<[base64 -file sqlite3.wasm.base64]>>>`;
+//%@ pop policy delimiter
+    const bytes = Uint8Array.fromBase64(b64Wasm);
+    b64Wasm = null;
+
+    WebAssembly.instantiate(bytes.buffer, imports)
+      .then(finalThen)
+      .catch((err)=>{
+        console.error("Failed to instantiate embedded sqlite3.wasm", err);
+        throw err;
+      });
+
+    return {}/* Emscripten interprets this to wait on async instantiation
+                via onSuccess(). */;
+//%else
     const uri = Module.locateFile(
       sims.wasmFilename, (
         ('undefined'===typeof scriptDirectory/*var defined by Emscripten glue*/)
@@ -112,11 +173,6 @@
     );
     sims.debugModule("instantiateWasm() uri =", uri, "sIMS =",this);
     const wfetch = ()=>fetch(uri, {credentials: 'same-origin'});
-    const finalThen = (arg)=>{
-      arg.imports = imports;
-      sims.instantiateWasm = arg /* used by sqlite3-api-prologue.c-pp.js */;
-      onSuccess(arg.instance, arg.module);
-    };
     const loadWasm = WebAssembly.instantiateStreaming
           ? async ()=>
           WebAssembly
@@ -128,7 +184,9 @@
           .then(bytes => WebAssembly.instantiate(bytes, imports))
           .then(finalThen)
     return loadWasm();
+//%/if sqlite3.wasm.base64 pass 2
   }.bind(sIMS);
-//#endif Module.instantiateWasm and not wasmfs
+//#/if Module.instantiateWasm and not wasmfs
 })(Module);
+//#/if not target:es6-bundler-friendly and not target:node
 /* END FILE: api/pre-js.js. */

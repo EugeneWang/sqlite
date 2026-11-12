@@ -33,9 +33,9 @@
     directory from which `sqlite3.js` will be loaded.
 */
 //#if target:es6-bundler-friendly
-import {default as sqlite3InitModule} from './sqlite3-bundler-friendly.mjs';
+import sqlite3InitModule from './sqlite3-bundler-friendly.mjs';
 //#elif target:es6-module
-    return new Worker(new URL("sqlite3.js", import.meta.url));
+import sqlite3InitModule from './sqlite3.mjs';
 //#else
 "use strict";
 {
@@ -44,13 +44,18 @@ import {default as sqlite3InitModule} from './sqlite3-bundler-friendly.mjs';
         : new URLSearchParams();
   let theJs = 'sqlite3.js';
   if(urlParams.has('sqlite3.dir')){
-    theJs = urlParams.get('sqlite3.dir') + '/' + theJs;
+    const s = urlParams.get('sqlite3.dir');
+    if( s && s.indexOf(':')<0 && s.indexOf('//')<0 ){
+      theJs = s + '/' + theJs;
+    }else{
+      console.warn("Invalid sqlite3.dir value:",s);
+    }
   }
   //console.warn("worker1 theJs =",theJs);
   importScripts(theJs);
 }
-//#endif
+//#/if
 sqlite3InitModule().then(sqlite3 => sqlite3.initWorker1API());
 //#else
 /* Built with the omit-oo1 flag. */
-//#endif if not omit-oo1
+//#/if if not omit-oo1

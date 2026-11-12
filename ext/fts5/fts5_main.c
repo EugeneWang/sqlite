@@ -517,7 +517,7 @@ static void fts5SetEstimatedRows(sqlite3_index_info *pIdxInfo, i64 nRow){
   if( sqlite3_libversion_number()>=3008002 )
 #endif
   {
-    pIdxInfo->estimatedRows = nRow;
+    pIdxInfo->estimatedRows = MAX(1, nRow);
   }
 #endif
 }
@@ -586,19 +586,30 @@ static int fts5UsePatternMatch(
 **  a) If a MATCH operator is present, the cost depends on the other
 **     constraints also present. As follows:
 **
-**       * No other constraints:         cost=1000.0
-**       * One rowid range constraint:   cost=750.0
-**       * Both rowid range constraints: cost=500.0
-**       * An == rowid constraint:       cost=100.0
+**       * No other constraints:         cost=50000.0
+**       * One rowid range constraint:   cost=37500.0
+**       * Both rowid range constraints: cost=30000.0
+**       * An == rowid constraint:       cost=25000.0
 **
 **  b) Otherwise, if there is no MATCH:
 **
-**       * No other constraints:         cost=1000000.0
-**       * One rowid range constraint:   cost=750000.0
-**       * Both rowid range constraints: cost=250000.0
-**       * An == rowid constraint:       cost=10.0
+**       * No other constraints:         cost=3000000.0
+**       * One rowid range constraints:  cost=2250000.0
+**       * Both rowid range constraint:  cost=750000.0
+**       * An == rowid constraint:       cost=25.0
 **
 ** Costs are not modified by the ORDER BY clause.
+**
+** The ratios used in case (a) are based on informal results obtained from 
+** the tool/fts5cost.tcl script. The "MATCH and ==" combination has the
+** cost set quite high because the query may be a prefix query. Unless
+** there is a prefix index, prefix queries with rowid constraints are much 
+** more expensive than non-prefix queries with rowid constraints.
+**
+** The estimated rows returned is set to the cost/40. For simple queries,
+** experimental results show that cost/4 might be about right. But for
+** more complex queries that use multiple terms the number of rows might
+** be far fewer than this. So we compromise and use cost/40.
 */
 static int fts5BestIndexMethod(sqlite3_vtab *pVTab, sqlite3_index_info *pInfo){
   Fts5Table *pTab = (Fts5Table*)pVTab;
@@ -631,7 +642,7 @@ static int fts5BestIndexMethod(sqlite3_vtab *pVTab, sqlite3_index_info *pInfo){
     return SQLITE_ERROR;
   }
 
-  idxStr = (char*)sqlite3_malloc(pInfo->nConstraint * 8 + 1);
+  idxStr = (char*)sqlite3_malloc64((i64)pInfo->nConstraint * 8 + 1);
   if( idxStr==0 ) return SQLITE_NOMEM;
   pInfo->idxStr = idxStr;
   pInfo->needToFreeIdxStr = 1;
@@ -664,7 +675,9 @@ static int fts5BestIndexMethod(sqlite3_vtab *pVTab, sqlite3_index_info *pInfo){
         pInfo->aConstraintUsage[i].omit = 1;
       }
     }else if( p->usable ){
-      if( iCol>=0 && iCol<nCol && fts5UsePatternMatch(pConfig, p) ){
+      if( iCol>=0 && iCol<nCol && fts5UsePatternMatch(pConfig, p)
+       && pConfig->abUnindexed[iCol]==0
+      ){
         assert( p->op==FTS5_PATTERN_LIKE || p->op==FTS5_PATTERN_GLOB );
         idxStr[iIdxStr++] = p->op==FTS5_PATTERN_LIKE ? 'L' : 'G';
         sqlite3_snprintf(6, &idxStr[iIdxStr], "%d", iCol);
@@ -676,7 +689,6 @@ static int fts5BestIndexMethod(sqlite3_vtab *pVTab, sqlite3_index_info *pInfo){
         idxStr[iIdxStr++] = '=';
         bSeenEq = 1;
         pInfo->aConstraintUsage[i].argvIndex = ++iCons;
-        pInfo->aConstraintUsage[i].omit = 1;
       }
     }
   }
@@ -724,21 +736,35 @@ static int fts5BestIndexMethod(sqlite3_vtab *pVTab, sqlite3_index_info *pInfo){
 
   /* Calculate the estimated cost based on the flags set in idxFlags. */
   if( bSeenEq ){
-    pInfo->estimatedCost = nSeenMatch ? 1000.0 : 25.0;
-    fts5SetUniqueFlag(pInfo);
+    pInfo->estimatedCost = nSeenMatch ? 25000.0 : 25.0;
     fts5SetEstimatedRows(pInfo, 1);
+    fts5SetUniqueFlag(pInfo);
   }else{
-    if( bSeenLt && bSeenGt ){
-      pInfo->estimatedCost = nSeenMatch ? 5000.0 :   750000.0;
-    }else if( bSeenLt || bSeenGt ){
-      pInfo->estimatedCost = nSeenMatch ? 7500.0 :  2250000.0;
+    i64 nEstRows;
+    if( nSeenMatch ){
+      if( bSeenLt && bSeenGt ){
+        pInfo->estimatedCost = 50000.0;
+      }else if( bSeenLt || bSeenGt ){
+        pInfo->estimatedCost = 37500.0;
+      }else{
+        pInfo->estimatedCost = 50000.0;
+      }
+      nEstRows = (i64)(pInfo->estimatedCost / 40.0);
+      for(i=1; i<nSeenMatch; i++){
+        pInfo->estimatedCost *= 2.5;
+        nEstRows = nEstRows / 2;
+      }
     }else{
-      pInfo->estimatedCost = nSeenMatch ? 10000.0 : 3000000.0;
+      if( bSeenLt && bSeenGt ){
+        pInfo->estimatedCost = 750000.0;
+      }else if( bSeenLt || bSeenGt ){
+        pInfo->estimatedCost = 2250000.0;
+      }else{
+        pInfo->estimatedCost = 3000000.0;
+      }
+      nEstRows = (i64)(pInfo->estimatedCost / 4.0);
     }
-    for(i=1; i<nSeenMatch; i++){
-      pInfo->estimatedCost *= 0.4;
-    }
-    fts5SetEstimatedRows(pInfo, (i64)(pInfo->estimatedCost / 4.0));
+    fts5SetEstimatedRows(pInfo, nEstRows);
   }
 
   pInfo->idxNum = idxFlags;
@@ -1187,7 +1213,8 @@ static int fts5FindRankFunction(Fts5Cursor *pCsr){
     if( zSql ){
       sqlite3_stmt *pStmt = 0;
       rc = sqlite3_prepare_v3(pConfig->db, zSql, -1,
-                              SQLITE_PREPARE_PERSISTENT, &pStmt, 0);
+          SQLITE_PREPARE_PERSISTENT|SQLITE_PREPARE_FROM_DDL, &pStmt, 0
+      );
       sqlite3_free(zSql);
       assert( rc==SQLITE_OK || pCsr->pRankArgStmt==0 );
       if( rc==SQLITE_OK ){
@@ -2129,6 +2156,7 @@ static int fts5RollbackMethod(sqlite3_vtab *pVtab){
   int rc;
   Fts5FullTable *pTab = (Fts5FullTable*)pVtab;
   fts5CheckTransactionState(pTab, FTS5_ROLLBACK, 0);
+  fts5TripCursors(pTab);
   rc = sqlite3Fts5StorageRollback(pTab->pStorage);
   pTab->p.pConfig->pgsz = 0;
   return rc;
@@ -2313,15 +2341,17 @@ static int fts5CsrPoslist(
         rc = fts5SeekCursor(pCsr, 0);
       }
       for(i=0; i<pConfig->nCol && rc==SQLITE_OK; i++){
-        const char *z = 0;
-        int n = 0; 
-        rc = fts5TextFromStmt(pConfig, pCsr->pStmt, i, &z, &n);
-        if( rc==SQLITE_OK ){
-          rc = sqlite3Fts5ExprPopulatePoslists(
-              pConfig, pCsr->pExpr, aPopulator, i, z, n
-          );
+        if( pConfig->abUnindexed[i]==0 ){
+          const char *z = 0;
+          int n = 0; 
+          rc = fts5TextFromStmt(pConfig, pCsr->pStmt, i, &z, &n);
+          if( rc==SQLITE_OK ){
+            rc = sqlite3Fts5ExprPopulatePoslists(
+                pConfig, pCsr->pExpr, aPopulator, i, z, n
+            );
+          }
+          sqlite3Fts5ClearLocale(pConfig);
         }
-        sqlite3Fts5ClearLocale(pConfig);
       }
       sqlite3_free(aPopulator);
 
@@ -2679,19 +2709,23 @@ static int fts5ApiPhraseFirstColumn(
 
   if( pConfig->eDetail==FTS5_DETAIL_COLUMNS ){
     Fts5Sorter *pSorter = pCsr->pSorter;
-    int n;
-    if( pSorter ){
-      int i1 = (iPhrase==0 ? 0 : pSorter->aIdx[iPhrase-1]);
-      n = pSorter->aIdx[iPhrase] - i1;
-      pIter->a = &pSorter->aPoslist[i1];
+    if( iPhrase<0 || iPhrase>=sqlite3Fts5ExprPhraseCount(pCsr->pExpr) ){
+      rc = SQLITE_RANGE;
     }else{
-      rc = sqlite3Fts5ExprPhraseCollist(pCsr->pExpr, iPhrase, &pIter->a, &n);
-    }
-    if( rc==SQLITE_OK ){
-      assert( pIter->a || n==0 );
-      pIter->b = (pIter->a ? &pIter->a[n] : 0);
-      *piCol = 0;
-      fts5ApiPhraseNextColumn(pCtx, pIter, piCol);
+      int n;
+      if( pSorter ){
+        int i1 = (iPhrase==0 ? 0 : pSorter->aIdx[iPhrase-1]);
+        n = pSorter->aIdx[iPhrase] - i1;
+        pIter->a = &pSorter->aPoslist[i1];
+      }else{
+        rc = sqlite3Fts5ExprPhraseCollist(pCsr->pExpr, iPhrase, &pIter->a, &n);
+      }
+      if( rc==SQLITE_OK ){
+        assert( pIter->a || n==0 );
+        pIter->b = (pIter->a ? &pIter->a[n] : 0);
+        *piCol = 0;
+        fts5ApiPhraseNextColumn(pCtx, pIter, piCol);
+      }
     }
   }else{
     int n;
@@ -3763,7 +3797,7 @@ static int fts5Init(sqlite3 *db){
   int rc;
   Fts5Global *pGlobal = 0;
 
-  pGlobal = (Fts5Global*)sqlite3_malloc(sizeof(Fts5Global));
+  pGlobal = (Fts5Global*)sqlite3_malloc64(sizeof(Fts5Global));
   if( pGlobal==0 ){
     rc = SQLITE_NOMEM;
   }else{

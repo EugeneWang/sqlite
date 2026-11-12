@@ -17,9 +17,8 @@
 import {default as promiserFactory} from "./jswasm/sqlite3-worker1-promiser.mjs";
 //#else
 "use strict";
-const promiserFactory = globalThis.sqlite3Worker1Promiser.v2;
-delete globalThis.sqlite3Worker1Promiser;
-//#endif
+const promiserFactory = sqlite3Worker1Promiser.v2;
+//#/if
 (async function(){
   const T = globalThis.SqliteTestUtil;
   const eOutput = document.querySelector('#test-output');
@@ -53,7 +52,7 @@ delete globalThis.sqlite3Worker1Promiser;
          before workerPromise is set. */
       console.warn("This is the v2 interface - you don't need an onready() function.");
     },
-//#endif
+//#/if
     debug: 1 ? undefined : (...args)=>console.debug('worker debug',...args),
     onunhandled: function(ev){
       error("Unhandled worker message:",ev.data);

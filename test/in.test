@@ -578,8 +578,40 @@ do_test in-13.11 {
   }
 } {1 null null null 1}
 
-do_test in-13.12 {
+do_test in-13.12-desc {
   execsql {
+    CREATE INDEX i1 ON t7(a DESC);
+    CREATE INDEX i2 ON t7(b DESC);
+    CREATE INDEX i3 ON t7(c DESC);
+  }
+  execsql {
+    SELECT
+      2 IN (SELECT a FROM t7),
+      6 IN (SELECT a FROM t7),
+      2 IN (SELECT b FROM t7),
+      6 IN (SELECT b FROM t7),
+      2 IN (SELECT c FROM t7),
+      6 IN (SELECT c FROM t7)
+  } 
+} {1 null 1 0 1 0}
+
+do_test in-13.13-desc {
+  execsql {
+    SELECT
+      2 NOT IN (SELECT a FROM t7),
+      6 NOT IN (SELECT a FROM t7),
+      2 NOT IN (SELECT b FROM t7),
+      6 NOT IN (SELECT b FROM t7),
+      2 NOT IN (SELECT c FROM t7),
+      6 NOT IN (SELECT c FROM t7)
+  } 
+} {0 null 0 1 0 1}
+
+do_test in-13.12-asc {
+  execsql {
+    DROP INDEX i1;
+    DROP INDEX i2;
+    DROP INDEX i3;
     CREATE INDEX i1 ON t7(a);
     CREATE INDEX i2 ON t7(b);
     CREATE INDEX i3 ON t7(c);
@@ -595,7 +627,7 @@ do_test in-13.12 {
   } 
 } {1 null 1 0 1 0}
 
-do_test in-13.13 {
+do_test in-13.13-asc {
   execsql {
     SELECT
       2 NOT IN (SELECT a FROM t7),
@@ -623,11 +655,16 @@ do_test in-13.14 {
     SELECT * FROM a WHERE id NOT IN (SELECT id FROM b);
   }
 } {}
-do_test in-13.14 {
+do_test in-13.14-desc {
   execsql {
-    CREATE INDEX i5 ON b(id);
+    CREATE INDEX i5 ON b(id DESC);
     SELECT * FROM a WHERE id NOT IN (SELECT id FROM b);
   }
+} {}
+do_execsql_test in-13.14-asc {
+  DROP INDEX i5;
+  CREATE INDEX i5 ON b(id DESC);
+  SELECT * FROM a WHERE id NOT IN (SELECT id FROM b);
 } {}
 
 do_test in-13.15 {
@@ -798,13 +835,37 @@ do_execsql_test in-20.1 {
   SELECT (1 IN (2 IS TRUE));
 } {1}
 
-# Forum post: https://sqlite.org/forum/forumpost/5782619992.
+# Forum post:    2022-05-17T14:09:20Z, sqlite.org/forum/forumpost/5782619992.
+# Amended by Bug 2026-11-10T13:17:50Z, sqlite.org/bugs/info/fb2e7f646b87ede
 #
 reset_db
+db null NULL
 do_execsql_test in-21.1 {
   CREATE TABLE t0(c0);
+  INSERT INTO t0 VALUES(1),('two'),(NULL);
   SELECT COUNT(*) FROM t0 ORDER BY (t0.c0 IN ());
-} {0}
+} {3}
+do_execsql_test in-21.2 {
+  SELECT * FROM t0 ORDER BY (t0.c0 IN ());
+} {1 two NULL}
+do_execsql_test in-21.3 {
+  SELECT * FROM t0 ORDER BY (t0.c0 NOT IN ());
+} {1 two NULL}
+do_execsql_test in-21.4 {
+  SELECT typeof(0 IN ());
+} integer
+do_execsql_test in-21.5 {
+  SELECT '' IS 0;
+} 0
+do_execsql_test in-21.6 {
+  SELECT '' IS (0 IN ());
+} 0
+do_execsql_test in-21.7 {
+  SELECT 5  IS 1;
+} 0
+do_execsql_test in-21.8 {
+  SELECT 5  IS (0 NOT IN ());
+} 0
 
 # Ignore extra parentheses around a subquery on the RHS of an IN operator,
 # because that is what PostgreSQL does.
@@ -859,5 +920,22 @@ do_execsql_test in-23.1 {
              GROUP BY a);
   SELECT * FROM t5;
 } 1
+
+#-------------------------------------------------------------------------
+# Report: https://sqlite.org/bugs/forumpost/6cdcfba787
+#
+reset_db
+do_execsql_test in-24.0 {
+  CREATE TABLE t1(c TEXT);
+  INSERT INTO t1 VALUES('abc');
+}
+
+do_execsql_test in-24.1 {
+  SELECT * FROM t1 WHERE c IN ('ABC' COLLATE nocase);
+}
+
+do_execsql_test in-24.2 {
+  SELECT * FROM t1 WHERE c IN (+('ABC' COLLATE nocase));
+}
 
 finish_test

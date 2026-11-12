@@ -32,7 +32,7 @@
 **     ^X      X occurring at the beginning of the string
 **     X$      X occurring at the end of the string
 **     .       Match any single character
-**     \c      Character c where c is one of \{}()[]|*+?.
+**     \c      Character c where c is one of \{}()[]|*+?-.
 **     \c      C-language escapes for c in afnrtv.  ex: \t or \n
 **     \uXXXX  Where XXXX is exactly 4 hex digits, unicode value XXXX
 **     \xXX    Where XX is exactly 2 hex digits, unicode value XX
@@ -417,11 +417,14 @@ static int re_hex(int c, int *pV){
 ** return its interpretation.
 */
 static unsigned re_esc_char(ReCompiled *p){
-  static const char zEsc[] = "afnrtv\\()*.+?[$^{|}]";
+  static const char zEsc[] = "afnrtv\\()*.+?[$^{|}]-";
   static const char zTrans[] = "\a\f\n\r\t\v";
   int i, v = 0;
   char c;
-  if( p->sIn.i>=p->sIn.mx ) return 0;
+  if( p->sIn.i>=p->sIn.mx ){
+    p->zErr = "unknown \\ escape";
+    return 0;
+  }
   c = p->sIn.z[p->sIn.i];
   if( c=='u' && p->sIn.i+4<p->sIn.mx ){
     const unsigned char *zIn = p->sIn.z + p->sIn.i;
@@ -676,7 +679,7 @@ static const char *re_compile(
   int i, j;
 
   *ppRe = 0;
-  pRe = sqlite3_malloc( sizeof(*pRe) );
+  pRe = sqlite3_malloc64( sizeof(*pRe) );
   if( pRe==0 ){
     return "out of memory";
   }
@@ -688,11 +691,7 @@ static const char *re_compile(
     re_free(pRe);
     return zErr;
   }
-  if( zIn[0]=='^' ){
-    zIn++;
-  }else{
-    re_append(pRe, RE_OP_ANYSTAR, 0);
-  }
+  re_append(pRe, RE_OP_ANYSTAR, 0);
   pRe->sIn.z = (unsigned char*)zIn;
   pRe->sIn.i = 0;
   pRe->sIn.mx = (int)strlen(zIn);
@@ -707,6 +706,19 @@ static const char *re_compile(
   }else{
     re_free(pRe);
     return "unrecognized character";
+  }
+
+  /* If the regex begins with "^" and has no "|" at the top level, then
+  ** the whole regex is anchored at the start of the input and the
+  ** initial ".*" is not needed.  Convert it into a no-op so that
+  ** re_match() can stop as soon as the start of the input fails to
+  ** match.  A "|" at the top level would have caused a FORK to be
+  ** inserted at aOp[1], so aOp[1]==RE_OP_ATSTART is sufficient.  Do
+  ** not remove the initial "^" itself, as there might be jumps back
+  ** to it, as in "^+". */
+  if( pRe->aOp[1]==RE_OP_ATSTART ){
+    pRe->aOp[0] = RE_OP_GOTO;
+    pRe->aArg[0] = 1;
   }
 
   /* The following is a performance optimization.  If the regex begins with
@@ -828,7 +840,6 @@ static void re_bytecode_func(
   int i;
   int n;
   char *z;
-  (void)argc;
   static const char *ReOpName[] = {
     "EOF",
     "MATCH",
@@ -851,6 +862,7 @@ static void re_bytecode_func(
     "ATSTART",
   };
 
+  (void)argc;
   zPattern = (const char*)sqlite3_value_text(argv[0]);
   if( zPattern==0 ) return;
   zErr = re_compile(&pRe, zPattern, re_maxnfa(re_maxlen(context)),
@@ -865,7 +877,6 @@ static void re_bytecode_func(
     return;
   }
   pStr = sqlite3_str_new(0);
-  if( pStr==0 ) goto re_bytecode_func_err;
   if( pRe->nInit>0 ){
     sqlite3_str_appendf(pStr, "INIT     ");
     for(i=0; i<pRe->nInit; i++){
@@ -877,15 +888,15 @@ static void re_bytecode_func(
     sqlite3_str_appendf(pStr, "%-8s %4d\n",
          ReOpName[(unsigned char)pRe->aOp[i]], pRe->aArg[i]);
   }
+  if( sqlite3_str_errcode(pStr)==SQLITE_NOMEM ){
+    sqlite3_str_finish(pStr);
+    re_free(pRe);
+    sqlite3_result_error_nomem(context);
+    return;
+  }
   n = sqlite3_str_length(pStr);
   z = sqlite3_str_finish(pStr);
-  if( n==0 ){
-    sqlite3_free(z);
-  }else{
-    sqlite3_result_text(context, z, n-1, sqlite3_free);
-  }
-
-re_bytecode_func_err:
+  sqlite3_result_text(context, z, n-1, sqlite3_free);
   re_free(pRe);
 }
 

@@ -29,10 +29,22 @@
 ** RBU does not use this extension directly.  Rather, this extension is
 ** provided as a convenience to developers who want to analyze RBU files
 ** that contain deltas.
+**
+** Typical build commands assuming
+**
+**    DIR=ext/misc
+*     NAME=fossildelta
+**
+** First run "make sqlite3ext.h" then:
+**
+**   linux: gcc -shared -I. -fPIC -o $NAME.so $DIR/$NAME.c
+**   OS-X:  gcc -dynamiclib -fPIC -I. -o $NAME.dylib $DIR/$NAME.c
+**   Win11: cl -I. $DIR/$NAME.c -link -dll -out:$NAME.dll
 */
 #include <string.h>
 #include <assert.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include "sqlite3ext.h"
 SQLITE_EXTENSION_INIT1
 
@@ -43,6 +55,7 @@ SQLITE_EXTENSION_INIT1
 */
 typedef unsigned int u32;
 typedef sqlite3_uint64 u64;
+typedef sqlite3_int64 i64;
 
 /*
 ** Must be a 16-bit value
@@ -167,16 +180,26 @@ static unsigned int deltaGetInt(const char **pz, int *pLen){
     25, 26, 27, 28, 29, 30, 31, 32,   33, 34, 35, -1, -1, -1, -1, 36,
     -1, 37, 38, 39, 40, 41, 42, 43,   44, 45, 46, 47, 48, 49, 50, 51,
     52, 53, 54, 55, 56, 57, 58, 59,   60, 61, 62, -1, -1, -1, 63, -1,
+
+    -1, -1, -1, -1, -1, -1, -1, -1,   -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,   -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,   -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,   -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,   -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,   -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,   -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,   -1, -1, -1, -1, -1, -1, -1, -1,
   };
   unsigned int v = 0;
   int c;
   unsigned char *z = (unsigned char*)*pz;
-  unsigned char *zStart = z;
-  while( (c = zValue[0x7f&*(z++)])>=0 ){
-     v = (v<<6) + c;
+  unsigned char *zEnd = z + (*pLen);
+  while( z<zEnd && (c = zValue[*z])>=0 ){
+    v = (v<<6) + c;
+    z++;
   }
-  z--;
-  *pLen -= z - zStart;
+
+  *pLen -= (int)(z - (unsigned char*)*pz);
   *pz = (char*)z;
   return v;
 }
@@ -266,7 +289,8 @@ static unsigned int checksum(const char *zIn, size_t N){
 ** The delta string will be NUL-terminated, but it might also contain
 ** embedded NUL characters if either the zSrc or zOut files are
 ** binary.  This function returns the length of the delta string
-** in bytes, excluding the final NUL terminator character.
+** in bytes, excluding the final NUL terminator character.  It returns
+** 0 if an OOM occurs.
 **
 ** Output Format:
 **
@@ -358,6 +382,7 @@ static int delta_create(
   */
   nHash = lenSrc/NHASH;
   collide = sqlite3_malloc64( (sqlite3_int64)nHash*2*sizeof(int) );
+  if( collide==0 ) return 0;
   memset(collide, -1, nHash*2*sizeof(int));
   landmark = &collide[nHash];
   for(i=0; i<lenSrc-NHASH; i+=NHASH){
@@ -498,17 +523,17 @@ static int delta_create(
 
 /*
 ** Return the size (in bytes) of the output from applying
-** a delta.
+** a delta or a negative value on error.
 **
 ** This routine is provided so that an procedure that is able
 ** to call delta_apply() can learn how much space is required
-** for the output and hence allocate nor more space that is really
+** for the output and hence allocate no more space than is really
 ** needed.
 */
-static int delta_output_size(const char *zDelta, int lenDelta){
-  int size;
+static sqlite3_int64 delta_output_size(const char *zDelta, int lenDelta){
+  sqlite3_int64 size;
   size = deltaGetInt(&zDelta, &lenDelta);
-  if( *zDelta!='\n' ){
+  if( lenDelta<=0 || *zDelta!='\n' ){
     /* ERROR: size integer not terminated by "\n" */
     return -1;
   }
@@ -543,21 +568,22 @@ static int delta_apply(
   int lenDelta,          /* Length of the delta */
   char *zOut             /* Write the output into this preallocated buffer */
 ){
-  unsigned int limit;
-  unsigned int total = 0;
+  sqlite3_uint64 limit;
+  sqlite3_uint64 total = 0;
 #ifdef FOSSIL_ENABLE_DELTA_CKSUM_TEST
   char *zOrigOut = zOut;
 #endif
 
   limit = deltaGetInt(&zDelta, &lenDelta);
-  if( *zDelta!='\n' ){
+  if( lenDelta<=0 || *zDelta!='\n' ){
     /* ERROR: size integer not terminated by "\n" */
     return -1;
   }
-  zDelta++; lenDelta--;
-  while( *zDelta && lenDelta>0 ){
+  zDelta++; lenDelta--; /* Skip the \n */
+  while( lenDelta>0 && zDelta[0] ){
     unsigned int cnt, ofst;
     cnt = deltaGetInt(&zDelta, &lenDelta);
+    if( lenDelta<=0 ) return -1;
     switch( zDelta[0] ){
       case '@': {
         zDelta++; lenDelta--;
@@ -667,9 +693,9 @@ static void deltaApplyFunc(
   int argc,
   sqlite3_value **argv
 ){
-  const char *aOrig;   int nOrig;        /* The X input */
-  const char *aDelta;  int nDelta;       /* The input delta (D) */
-  char *aOut;          int nOut, nOut2;  /* The output */
+  const char *aOrig;   int nOrig;          /* The X input */
+  const char *aDelta;  int nDelta;         /* The input delta (D) */
+  char *aOut;          sqlite3_int64 nOut; /* The output */
 
   assert( argc==2 );
   if( sqlite3_value_type(argv[0])==SQLITE_NULL ) return;
@@ -685,11 +711,15 @@ static void deltaApplyFunc(
     sqlite3_result_error(context, "corrupt fossil delta", -1);
     return;
   }
-  aOut = sqlite3_malloc64((sqlite3_int64)nOut+1);
+  if( nOut > 0x7fffffff ){
+    sqlite3_result_error_toobig(context);
+    return;
+  }
+  aOut = sqlite3_malloc64(nOut+1);
   if( aOut==0 ){
     sqlite3_result_error_nomem(context);
   }else{
-    nOut2 = delta_apply(aOrig, nOrig, aDelta, nDelta, aOut);
+    const int nOut2 = delta_apply(aOrig, nOrig, aDelta, nDelta, aOut);
     if( nOut2!=nOut ){
       sqlite3_free(aOut);
       sqlite3_result_error(context, "corrupt fossil delta", -1);
@@ -711,7 +741,7 @@ static void deltaOutputSizeFunc(
   sqlite3_value **argv
 ){
   const char *aDelta;  int nDelta;       /* The input delta (D) */
-  int nOut;                              /* Size of output */
+  sqlite3_int64 nOut;                    /* Size of output */
   assert( argc==1 );
   if( sqlite3_value_type(argv[0])==SQLITE_NULL ) return;
   nDelta = sqlite3_value_bytes(argv[0]);
@@ -723,7 +753,7 @@ static void deltaOutputSizeFunc(
     sqlite3_result_error(context, "corrupt fossil delta", -1);
     return;
   }else{
-    sqlite3_result_int(context, nOut);
+    sqlite3_result_int64(context, nOut);
   }
 }
 
@@ -769,11 +799,11 @@ struct deltaparsevtab_vtab {
 struct deltaparsevtab_cursor {
   sqlite3_vtab_cursor base;  /* Base class - must be first */
   char *aDelta;              /* The delta being parsed */
-  int nDelta;                /* Number of bytes in the delta */
-  int iCursor;               /* Current cursor location */
+  i64 iCursor;               /* Current cursor location */
+  i64 iNext;                 /* Next cursor value */
+  i64 nDelta;                /* Number of bytes in the delta */
   int eOp;                   /* Name of current operator */
   unsigned int a1, a2;       /* Arguments to current operator */
-  int iNext;                 /* Next cursor value */
 };
 
 /* Operator names:
@@ -843,7 +873,7 @@ static int deltaparsevtabDisconnect(sqlite3_vtab *pVtab){
 */
 static int deltaparsevtabOpen(sqlite3_vtab *p, sqlite3_vtab_cursor **ppCursor){
   deltaparsevtab_cursor *pCur;
-  pCur = sqlite3_malloc( sizeof(*pCur) );
+  pCur = sqlite3_malloc64( sizeof(*pCur) );
   if( pCur==0 ) return SQLITE_NOMEM;
   memset(pCur, 0, sizeof(*pCur));
   *ppCursor = &pCur->base;
@@ -859,6 +889,11 @@ static int deltaparsevtabClose(sqlite3_vtab_cursor *cur){
   sqlite3_free(pCur);
   return SQLITE_OK;
 }
+
+/*
+** Compute the difference (in bytes) between two pointers.
+*/
+#define PTR_DIFF(A,B)  ((i64)(intptr_t)(A) - (i64)(intptr_t)(B))
 
 
 /*
@@ -876,10 +911,12 @@ static int deltaparsevtabNext(sqlite3_vtab_cursor *cur){
     return SQLITE_OK;
   }
   z = pCur->aDelta + pCur->iCursor;
+  i = pCur->nDelta - pCur->iCursor;
   pCur->a1 = deltaGetInt(&z, &i);
-  switch( z[0] ){
+  switch( i>0 ? z[0] : 0 ){
     case '@': {
       z++;
+      i--;
       if( pCur->iNext>=pCur->nDelta ){
         pCur->eOp = DELTAPARSE_OP_ERROR;
         pCur->iNext = pCur->nDelta;
@@ -887,14 +924,14 @@ static int deltaparsevtabNext(sqlite3_vtab_cursor *cur){
       }
       pCur->a2 = deltaGetInt(&z, &i);
       pCur->eOp = DELTAPARSE_OP_COPY;
-      pCur->iNext = (int)(&z[1] - pCur->aDelta);
+      pCur->iNext = PTR_DIFF(&z[1],pCur->aDelta);
       break;
     }
     case ':': {
       z++;
       pCur->a2 = (unsigned int)(z - pCur->aDelta);
       pCur->eOp = DELTAPARSE_OP_INSERT;
-      pCur->iNext = (int)(&z[pCur->a1] - pCur->aDelta);
+      pCur->iNext = PTR_DIFF(&z[pCur->a1],pCur->aDelta);
       break;
     }
     case ';': {
@@ -931,14 +968,14 @@ static int deltaparsevtabColumn(
       break;
     }
     case DELTAPARSEVTAB_A1: {
-      sqlite3_result_int(ctx, pCur->a1);
+      sqlite3_result_int64(ctx, pCur->a1);
       break;
     }
     case DELTAPARSEVTAB_A2: {
       if( pCur->eOp==DELTAPARSE_OP_COPY ){
-        sqlite3_result_int(ctx, pCur->a2);
+        sqlite3_result_int64(ctx, pCur->a2);
       }else if( pCur->eOp==DELTAPARSE_OP_INSERT ){
-        if( pCur->a2 + pCur->a1 > pCur->nDelta ){
+        if( (i64)pCur->a2 + (i64)pCur->a1 > pCur->nDelta ){
           sqlite3_result_zeroblob(ctx, pCur->a1);
         }else{
           sqlite3_result_blob(ctx, pCur->aDelta+pCur->a2, pCur->a1,
@@ -997,7 +1034,8 @@ static int deltaparsevtabFilter(
   if( pCur->nDelta==0 || a==0 ){
     return SQLITE_OK;
   }
-  pCur->aDelta = sqlite3_malloc64( pCur->nDelta+1 );
+  sqlite3_free(pCur->aDelta);
+  pCur->aDelta = sqlite3_malloc64(pCur->nDelta+1);
   if( pCur->aDelta==0 ){
     pCur->nDelta = 0;
     return SQLITE_NOMEM;
@@ -1005,16 +1043,17 @@ static int deltaparsevtabFilter(
   memcpy(pCur->aDelta, a, pCur->nDelta);
   pCur->aDelta[pCur->nDelta] = 0;
   a = pCur->aDelta;
+  i = pCur->nDelta;
   pCur->eOp = DELTAPARSE_OP_SIZE;
   pCur->a1 = deltaGetInt(&a, &i);
-  if( a[0]!='\n' ){
+  if( i<=0 || a[0]!='\n' ){
     pCur->eOp = DELTAPARSE_OP_ERROR;
     pCur->a1 = pCur->a2 = 0;
     pCur->iNext = pCur->nDelta;
     return SQLITE_OK;
   }
   a++;
-  pCur->iNext = (unsigned int)(a - pCur->aDelta);
+  pCur->iNext =  PTR_DIFF(a,pCur->aDelta);
   return SQLITE_OK;
 }
 

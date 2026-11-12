@@ -124,6 +124,27 @@ do_execsql_test 1.23 {
   SELECT next_char('ab','vocab2','w',null,'binary');
 } {c}
 
+# Bug 2026-10-29T11:59:57Z: next_char() looped forever under NOCASE
+# when one of the next characters was "Z", as the characters between
+# "Z" and "a" sort before "a" in NOCASE order.
+#
+do_execsql_test 1.24 {
+  CREATE TABLE vocab3(w TEXT COLLATE NOCASE UNIQUE);
+  INSERT INTO vocab3 VALUES('Zebra'),('zoo'),('apple'),('[x');
+  SELECT next_char('','vocab3','w');
+} {{[aZ}}
+do_execsql_test 1.25 {
+  SELECT next_char('z','vocab3','w');
+} {eo}
+do_execsql_test 1.26 {
+  CREATE TABLE vocab4(w TEXT UNIQUE);
+  INSERT INTO vocab4 SELECT w FROM vocab3;
+  INSERT INTO vocab4 VALUES('q' || char(1114111)), ('q' || char(1114111) || 'x');
+  SELECT next_char('','vocab4','w',null,'nocase'),
+         next_char('','vocab4','w'),
+         next_char('q','vocab4','w') = char(1114111);
+} {{[aqZ} {Z[aqz} 1}
+
 do_execsql_test 1.30 {
   SELECT rowid FROM t1 WHERE word='rabbit';
 } {2}
@@ -400,6 +421,63 @@ foreach {tn conflict err bRollback res} {
   do_execsql_test 7.5.2.$tn.2 { SELECT rowid, word FROM t4 } $res
   do_test 7.5.2.$tn.3 { sqlite3_get_autocommit db } $bRollback
   catchsql ROLLBACK
+}
+
+# Bug 2026-06-23T05:41:00Z
+#
+do_execsql_test 8.1 {
+  DROP TABLE IF EXISTS t1;
+  CREATE TABLE d(w);
+  INSERT INTO d VALUES(1);
+  WITH RECURSIVE cnt(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM cnt WHERE n<100)
+  SELECT sum(length(next_char(
+    printf('%.*c',1000000,'A'),
+    'd',
+    'substr(printf(''%.*c'',2000000,''A''),1,if(abs(random())%2=0,1000001,1))')))>0
+    FROM cnt;
+} {1}
+
+# Bug 2026-06-23T18:48:40Z
+#
+do_execsql_test 8.2 {
+  DROP TABLE IF EXISTS t1;
+  CREATE VIRTUAL TABLE t1 USING spellfix1;
+  INSERT INTO t1(word) VALUES('hello'),('world');
+  SELECT word FROM t1 WHERE word MATCH '';
+} {hello world}
+
+# Bug 2026-06-26T10:52:36Z
+#
+do_execsql_test 8.3 {
+  DROP TABLE t1;
+  CREATE VIRTUAL TABLE t1 USING spellfix1;
+  INSERT INTO t1(command) VALUES('edit_cost_table=''xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+} {}
+
+
+#-------------------------------------------------------------------------
+# Check that the next_char() function is not marked SQLITE_INNOCUOUS.
+#
+do_execsql_test 9.1 {
+  SELECT (flags & 0x200000) FROM pragma_function_list
+   WHERE name='next_char';
+} {0 0 0}
+
+do_execsql_test 9.2 {
+  CREATE TABLE dict(word);
+  INSERT INTO dict VALUES('cat'), ('car'), ('cow');
+  CREATE VIEW v1 AS SELECT next_char('c', 'dict', 'word') AS x;
+  PRAGMA trusted_schema = ON;
+  SELECT * FROM v1;
+} {ao}
+
+do_catchsql_test 9.3 {
+  PRAGMA trusted_schema = OFF;
+  SELECT * FROM v1;
+} {1 {unsafe use of next_char()}}
+
+do_execsql_test 9.4 {
+  PRAGMA trusted_schema = ON;
 }
 
 finish_test

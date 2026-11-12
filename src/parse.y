@@ -784,6 +784,7 @@ seltablist(A) ::= stl_prefix(A) nm(Y) dbnm(D) LP exprlist(E) RP as(Z) on_using(N
         SrcItem *pOld = F->a;
         assert( pOld->fg.fixedSchema==0 );
         pNew->zName = pOld->zName;
+        pOld->zName = 0;
         assert( pOld->fg.fixedSchema==0 );
         if( pOld->fg.isSubquery ){
           pNew->fg.isSubquery = 1;
@@ -803,8 +804,13 @@ seltablist(A) ::= stl_prefix(A) nm(Y) dbnm(D) LP exprlist(E) RP as(Z) on_using(N
           pOld->u1.pFuncArg = 0;
           pOld->fg.isTabFunc = 0;
           pNew->fg.isTabFunc = 1;
+        }else if( pOld->fg.isIndexedBy ){
+          pNew->u1.zIndexedBy = pOld->u1.zIndexedBy;
+          pOld->u1.zIndexedBy = 0;
+          pOld->fg.isIndexedBy = 0;
+          pNew->fg.isIndexedBy = 1;
         }
-        pOld->zName = 0;
+        pNew->fg.notIndexed = pOld->fg.notIndexed;
       }
       sqlite3SrcListDelete(pParse->db, F);
     }else{
@@ -846,9 +852,8 @@ xfullname(A) ::= nm(X) AS nm(Z).  {
   if( A ){
     if( IN_RENAME_OBJECT ){
       sqlite3RenameTokenMap(pParse, A->a[0].zName, &X);
-    }else{
-      A->a[0].zAlias = sqlite3NameFromToken(pParse->db, &Z);
     }
+    A->a[0].zAlias = sqlite3NameFromToken(pParse->db, &Z);
   }
 }
 xfullname(A) ::= nm(X) DOT nm(Y) AS nm(Z). {
@@ -856,9 +861,8 @@ xfullname(A) ::= nm(X) DOT nm(Y) AS nm(Z). {
   if( A ){
     if( IN_RENAME_OBJECT ){
       sqlite3RenameTokenMap(pParse, A->a[0].zName, &Y);
-    }else{
-      A->a[0].zAlias = sqlite3NameFromToken(pParse->db, &Z);
     }
+    A->a[0].zAlias = sqlite3NameFromToken(pParse->db, &Z);
   }
 }
 
@@ -1334,9 +1338,11 @@ expr(A) ::= LP nexprlist(X) COMMA expr(Y) RP. {
   ExprList *pList = sqlite3ExprListAppend(pParse, X, Y);
   A = sqlite3PExpr(pParse, TK_VECTOR, 0, 0);
   if( A ){
+    int i;
     A->x.pList = pList;
-    if( ALWAYS(pList->nExpr) ){
-      A->flags |= pList->a[0].pExpr->flags & EP_Propagate;
+    for(i=0; i<pList->nExpr; i++){
+      assert( pList->a[i].pExpr!=0 );
+      A->flags |= pList->a[i].pExpr->flags & EP_Propagate;
     }
   }else{
     sqlite3ExprListDelete(pParse->db, pList);
@@ -1399,9 +1405,11 @@ expr(A) ::= expr(A) likeop(OP) expr(Y) ESCAPE expr(E).  [LIKE_KW]  {
       case TK_INTEGER:
       case TK_STRING:
       case TK_FLOAT:
-      case TK_BLOB:
+      case TK_BLOB: 
         sqlite3ExprDeferredDelete(pParse, pLeft);
-        return sqlite3ExprInt32(pParse->db, op==TK_NOTNULL);
+        p = sqlite3ExprInt32(pParse->db, op==TK_NOTNULL);
+        if( p ) p->op2 = 1;
+        return p;
       default:
         break;
     }
@@ -1427,7 +1435,7 @@ expr(A) ::= expr(A) likeop(OP) expr(Y) ESCAPE expr(E).  [LIKE_KW]  {
 expr(A) ::= expr(A) ISNULL|NOTNULL(E).   {A = sqlite3PExprIsNull(pParse,@E,A);}
 expr(A) ::= expr(A) NOT NULL.    {A = sqlite3PExprIsNull(pParse,TK_NOTNULL,A);}
 
-//    expr1 IS expr2       same as    expr1 IS NOT DISTICT FROM expr2
+//    expr1 IS expr2       same as    expr1 IS NOT DISTINCT FROM expr2
 //    expr1 IS NOT expr2   same as    expr1 IS DISTINCT FROM expr2
 //
 expr(A) ::= expr(A) IS expr(Y).     {
@@ -1476,6 +1484,7 @@ expr(A) ::= expr(A) between_op(N) expr(X) AND expr(Y). [BETWEEN] {
   A = sqlite3PExpr(pParse, TK_BETWEEN, A, 0);
   if( A ){
     A->x.pList = pList;
+    sqlite3ExprSetHeightAndFlags(pParse, A);
   }else{
     sqlite3ExprListDelete(pParse->db, pList);
   } 
@@ -1499,9 +1508,9 @@ expr(A) ::= expr(A) between_op(N) expr(X) AND expr(Y). [BETWEEN] {
       ** it is or not) and if it is an aggregate, that could change the meaning
       ** of the whole query.
       */
-      Expr *pB = sqlite3Expr(pParse->db, TK_STRING, N ? "true" : "false");
-      if( pB ) sqlite3ExprIdToTrueFalse(pB);
+      Expr *pB = sqlite3ExprInt32(pParse->db, N!=0);
       if( !ExprHasProperty(A, EP_HasFunc) ){
+        if( pB ) pB->op2 = 1;
         sqlite3ExprUnmapAndDelete(pParse, A);
         A = pB;
       }else{
@@ -1509,7 +1518,11 @@ expr(A) ::= expr(A) between_op(N) expr(X) AND expr(Y). [BETWEEN] {
       }
     }else{
       Expr *pRHS = Y->a[0].pExpr;
-      if( Y->nExpr==1 && sqlite3ExprIsConstant(pParse,pRHS) && A->op!=TK_VECTOR ){
+      if( Y->nExpr==1
+       && sqlite3ExprIsConstant(pParse,pRHS)
+       && ExprHasProperty(pRHS, EP_Collate)==0
+       && A->op!=TK_VECTOR
+      ){
         Y->a[0].pExpr = 0;
         sqlite3ExprListDelete(pParse->db, Y);
         pRHS = sqlite3PExpr(pParse, TK_UPLUS, pRHS, 0);
@@ -1550,6 +1563,9 @@ expr(A) ::= expr(A) between_op(N) expr(X) AND expr(Y). [BETWEEN] {
   expr(A) ::= expr(A) in_op(N) nm(Y) dbnm(Z) paren_exprlist(E). [IN] {
     SrcList *pSrc = sqlite3SrcListAppend(pParse, 0,&Y,&Z);
     Select *pSelect = sqlite3SelectNew(pParse, 0,pSrc,0,0,0,0,0,0);
+    if( pSelect && IN_RENAME_OBJECT ){
+      sqlite3RenameTokenMap(pParse, pSrc->a[0].zName, Z.z ? &Z : &Y);
+    }
     if( E )  sqlite3SrcListFuncArgs(pParse, pSelect ? pSrc : 0, E);
     A = sqlite3PExpr(pParse, TK_IN, A, 0);
     sqlite3PExprAddSelect(pParse, A, pSelect);
@@ -1909,11 +1925,11 @@ cmd ::= ALTER TABLE fullname(X) ALTER kwcolumn_opt nm(Y) DROP NOT NULL. {
 cmd ::= ALTER TABLE fullname(X) ALTER kwcolumn_opt nm(Y) SET NOT(Z) NULL onconf. {
   sqlite3AlterSetNotNull(pParse, X, &Y, &Z);
 }
-cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(Y) nm(Z) CHECK LP(A) expr RP(B) onconf. {
-  sqlite3AlterAddConstraint(pParse, X, &Y, &Z, A.z+1, (B.z-A.z-1));
+cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT(Y) nm(Z) CHECK LP(A) expr(E) RP(B) onconf. {
+  sqlite3AlterAddConstraint(pParse, X, &Y, &Z, A.z+1, (B.z-A.z-1), E);
 }
-cmd ::= ALTER TABLE fullname(X) ADD CHECK(Y) LP(A) expr RP(B) onconf. {
-  sqlite3AlterAddConstraint(pParse, X, &Y, 0, A.z+1, (B.z-A.z-1));
+cmd ::= ALTER TABLE fullname(X) ADD CHECK(Y) LP(A) expr(E) RP(B) onconf. {
+  sqlite3AlterAddConstraint(pParse, X, &Y, 0, A.z+1, (B.z-A.z-1), E);
 }
 
 kwcolumn_opt ::= .

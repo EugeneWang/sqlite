@@ -79,6 +79,7 @@ struct WhereLevel {
   int addrNxt;          /* Jump here to start the next IN combination */
   int addrSkip;         /* Jump here for next iteration of skip-scan */
   int addrCont;         /* Jump here to continue with the next loop cycle */
+  int addrDeleteCont;   /* Delete auto-index entry then same as addrCont */
   int addrFirst;        /* First instruction of interior of the loop */
   int addrBody;         /* Beginning of the body of this loop */
   int regBignull;       /* big-null flag reg. True if a NULL-scan is needed */
@@ -594,10 +595,7 @@ Bitmask sqlite3WhereExprUsageNN(WhereMaskSet*, Expr*);
 Bitmask sqlite3WhereExprListUsage(WhereMaskSet*, ExprList*);
 void sqlite3WhereExprAnalyze(SrcList*, WhereClause*);
 void sqlite3WhereTabFuncArgs(Parse*, SrcItem*, WhereClause*);
-
-
-
-
+int sqlite3WhereLoopBloomable(const WhereLoop*);
 
 /*
 ** Bitmasks for the operators on WhereTerm objects.  These are all

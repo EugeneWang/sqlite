@@ -108,6 +108,7 @@
 #if defined(_MSC_VER)
 typedef unsigned char uint8_t;
 #endif
+typedef sqlite3_uint64 u64;
 
 /*
 ** Files in the virtual file system.
@@ -169,8 +170,20 @@ static struct GlobalVars {
 /*
 ** Include various extensions.
 */
-extern int sqlite3_vt02_init(sqlite3*,char**,const sqlite3_api_routines*);
-extern int sqlite3_randomjson_init(sqlite3*,char**,const sqlite3_api_routines*);
+extern int sqlite3_vt02_init(sqlite3*,char**,void*);
+extern int sqlite3_randomjson_init(sqlite3*,char**,void*);
+extern int sqlite3_series_init(sqlite3*,char**,void*);
+extern int sqlite3_base64_init(sqlite3*,char**,void*);
+extern int sqlite3_base85_init(sqlite3*,char**,void*);
+extern int sqlite3_completion_init(sqlite3*,char**,void*);
+extern int sqlite3_decimal_init(sqlite3*,char**,void*);
+extern int sqlite3_diskused_init(sqlite3*,char**,void*);
+extern int sqlite3_ieee_init(sqlite3*,char**,void*);
+extern int sqlite3_regexp_init(sqlite3*,char**,void*);
+extern int sqlite3_shathree_init(sqlite3*,char**,void*);
+extern int sqlite3_sha_init(sqlite3*,char**,void*);
+extern int sqlite3_stmtrand_init(sqlite3*,char**,void*);
+extern int sqlite3_strdup_init(sqlite3*,char**,void*);
 
 /*
 ** Print an error message and quit.
@@ -1009,7 +1022,7 @@ extern int fuzz_invariant(
   int nRow,               /* Total number of output rows */
   int *pbCorrupt,         /* IN/OUT: Flag indicating a corrupt database file */
   int eVerbosity,         /* How much debugging output */
-  unsigned int dbOpt      /* Default optimization flags */
+  u64 dbOpt               /* Default optimization flags */
 );
 
 /* Implementation of sqlite_dbdata and sqlite_dbptr */
@@ -1111,7 +1124,7 @@ static int runDbSql(
   sqlite3 *db,                /* Run SQL on this database connection */
   const char *zSql,           /* The SQL to be run */
   unsigned int *pBtsFlags,
-  unsigned int dbOpt          /* Default optimization flags */
+  u64 dbOpt                   /* Default optimization flags */
 ){
   int rc;
   sqlite3_stmt *pStmt;
@@ -1270,7 +1283,7 @@ int runCombinedDbSqlInput(
   FuzzCtx cx;                /* Fuzzing context */
   unsigned int btsFlags = 0; /* Parsing flags */
   unsigned int dbFlags = 0;  /* Flag values from db offset 72..75 */
-  unsigned int dbOpt = 0;    /* Flag values from db offset 76..79 */
+  u64 dbOpt = 0;             /* Flag values from db offset 76..83 */
 
 
   if( nByte<10 ) return 0;
@@ -1292,8 +1305,12 @@ int runCombinedDbSqlInput(
               ((unsigned int)aDb[74]<<8) + (unsigned int)aDb[75];
   }
   if( nDb>=79 ){
-    dbOpt = ((unsigned int)aDb[76]<<24) + ((unsigned int)aDb[77]<<16) +
-            ((unsigned int)aDb[78]<<8) + (unsigned int)aDb[79];
+    dbOpt = ((u64)aDb[76]<<24) + ((u64)aDb[77]<<16) +
+            ((u64)aDb[78]<<8) + (u64)aDb[79];
+  }
+  if( nDb>=83 ){
+    dbOpt |= ((u64)aDb[80]<<56) + ((u64)aDb[77]<<48) +
+             ((u64)aDb[78]<<40) + ((u64)aDb[79]<<32);
   }
   nSql = (int)(nByte - iSql);
   if( bScript ){
@@ -1382,6 +1399,18 @@ int runCombinedDbSqlInput(
 
   /* Activate extensions */
   sqlite3_randomjson_init(cx.db, 0, 0);
+  sqlite3_series_init(cx.db, 0, 0);
+  sqlite3_base64_init(cx.db, 0, 0);
+  sqlite3_base85_init(cx.db, 0, 0);
+  sqlite3_completion_init(cx.db, 0, 0);
+  sqlite3_decimal_init(cx.db, 0, 0);
+  sqlite3_diskused_init(cx.db, 0, 0);
+  sqlite3_ieee_init(cx.db, 0, 0);
+  sqlite3_regexp_init(cx.db, 0, 0);
+  sqlite3_shathree_init(cx.db, 0, 0);
+  sqlite3_sha_init(cx.db, 0, 0);
+  sqlite3_stmtrand_init(cx.db, 0, 0);
+  sqlite3_strdup_init(cx.db, 0, 0);
 
   /* Add support for sqlite_dbdata and sqlite_dbptr virtual tables used
   ** by the recovery API */
@@ -1954,6 +1983,7 @@ int main(int argc, char **argv){
   char **azSrcDb = 0;          /* Array of source database names */
   int iSrcDb;                  /* Loop over all source databases */
   int nTest = 0;               /* Total number of tests performed */
+  int nSliceSkip = 0;          /* Skipped due to --slice */
   char *zDbName = "";          /* Appreviated name of a source database */
   const char *zFailCode = 0;   /* Value of the TEST_FAILURE env variable */
   int cellSzCkFlag = 0;        /* --cell-size-check */
@@ -1977,6 +2007,7 @@ int main(int argc, char **argv){
   int iSliceIdx = 0;           /* Only run the piece with this index */
 
   sqlite3_config(SQLITE_CONFIG_URI,1);
+  sqlite3_config(SQLITE_CONFIG_MEMSTATUS,1);
   registerOomSimulator();
   sqlite3_initialize();
   iBegin = timeOfDay();
@@ -2519,6 +2550,7 @@ int main(int argc, char **argv){
       if( isDbSql(pSql->a, pSql->sz) ){
         if( iSliceSz>0 && (nTest%iSliceSz)!=iSliceIdx ){
           nTest++;
+          nSliceSkip++;
           continue;
         }
         sqlite3_snprintf(sizeof(g.zTestName), g.zTestName, "sqlid=%d",pSql->id);
@@ -2581,6 +2613,7 @@ int main(int argc, char **argv){
         const char *zVfs = "inmem";
         if( iSliceSz>0 && (nTest%iSliceSz)!=iSliceIdx ){
           nTest++;
+          nSliceSkip++;
           continue;
         }
         sqlite3_snprintf(sizeof(g.zTestName), g.zTestName, "sqlid=%d,dbid=%d",
@@ -2692,12 +2725,13 @@ int main(int argc, char **argv){
     if( briefFlag ){
       sqlite3_int64 iElapse = timeOfDay() - iBegin;
       if( iSliceSz>0 ){
-        printf("%s %s: slice %d/%d of %d tests, %d.%03d seconds\n",
-               pathTail(argv[0]), pathTail(g.zDbFile),
-               iSliceIdx, iSliceSz, nTest,
-               (int)(iElapse/1000), (int)(iElapse%1000));
+        printf(
+          "%s %s: 0 errors out of %d tests, slice %d/%d, %d.%03d seconds\n",
+          pathTail(argv[0]), pathTail(g.zDbFile),
+          nTest - nSliceSkip, iSliceIdx, iSliceSz,
+          (int)(iElapse/1000), (int)(iElapse%1000));
       }else{
-        printf("%s %s: 0 errors, %d tests, %d.%03d seconds\n",
+        printf("%s %s: 0 errors out of %d tests, %d.%03d seconds\n",
                pathTail(argv[0]), pathTail(g.zDbFile), nTest,
                (int)(iElapse/1000), (int)(iElapse%1000));
       }

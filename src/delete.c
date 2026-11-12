@@ -86,7 +86,7 @@ static int vtabIsReadOnly(Parse *pParse, Table *pTab){
   **   *  Only allow DELETE, INSERT, or UPDATE of non-SQLITE_VTAB_INNOCUOUS
   **      virtual tables if PRAGMA trusted_schema=ON.
   */
-  if( pParse->pToplevel!=0
+  if( (pParse->pToplevel!=0 || (pParse->prepFlags & SQLITE_PREPARE_FROM_DDL))
    && pTab->u.vtab.p->eVtabRisk >
            ((pParse->db->flags & SQLITE_TrustedSchema)!=0)
   ){
@@ -915,6 +915,7 @@ void sqlite3GenerateRowIndexDelete(
   v = pParse->pVdbe;
   pPk = HasRowid(pTab) ? 0 : sqlite3PrimaryKeyIndex(pTab);
   for(i=0, pIdx=pTab->pIndex; pIdx; i++, pIdx=pIdx->pNext){
+    int p3 = 0;
     assert( iIdxCur+i!=iDataCur || pPk==pIdx );
     if( aRegIdx!=0 && aRegIdx[i]==0 ) continue;
     if( pIdx==pPk ) continue;
@@ -922,9 +923,12 @@ void sqlite3GenerateRowIndexDelete(
     VdbeModuleComment((v, "GenRowIdxDel for %s", pIdx->zName));
     r1 = sqlite3GenerateIndexKey(pParse, pIdx, iDataCur, 0, 1,
         &iPartIdxLabel, pPrior, r1);
-    sqlite3VdbeAddOp3(v, OP_IdxDelete, iIdxCur+i, r1,
-        pIdx->uniqNotNull ? pIdx->nKeyCol : pIdx->nColumn);
-    sqlite3VdbeChangeP5(v, 1);  /* Cause IdxDelete to error if no entry found */
+    if( pIdx->bHasExpr && aRegIdx ){
+      p3 = aRegIdx[i];
+    }
+    sqlite3VdbeAddOp3(v, OP_IdxDelete, iIdxCur+i, r1, p3);
+    sqlite3VdbeChangeP4(v, -1, (const char*)pIdx, P4_INDEX);
+    sqlite3VdbeChangeP5(v, pIdx->uniqNotNull ? pIdx->nKeyCol : pIdx->nColumn);
     sqlite3ResolvePartIdxLabel(pParse, iPartIdxLabel);
     pPrior = pIdx;
   }
@@ -993,6 +997,7 @@ int sqlite3GenerateIndexKey(
   regBase = sqlite3GetTempRange(pParse, nCol);
   if( pPrior && (regBase!=regPrior || pPrior->pPartIdxWhere) ) pPrior = 0;
   for(j=0; j<nCol; j++){
+    int iTabCol;
     if( pPrior
      && pPrior->aiColumn[j]==pIdx->aiColumn[j]
      && pPrior->aiColumn[j]!=XN_EXPR
@@ -1001,7 +1006,9 @@ int sqlite3GenerateIndexKey(
       continue;
     }
     sqlite3ExprCodeLoadIndexColumn(pParse, pIdx, iDataCur, j, regBase+j);
-    if( pIdx->aiColumn[j]>=0 ){
+    if( (iTabCol = pIdx->aiColumn[j])>=0 
+     && (pIdx->pTable->aCol[iTabCol].colFlags & COLFLAG_VIRTUAL)==0
+    ){
       /* If the column affinity is REAL but the number is an integer, then it
       ** might be stored in the table as an integer (using a compact
       ** representation) then converted to REAL by an OP_RealAffinity opcode.

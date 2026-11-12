@@ -103,6 +103,9 @@ static const char *fts5ConfigSkipLiteral(const char *pIn){
         if( *p=='\'' ){
           p++;
           if( *p!='\'' ) break;
+        }else if( *p==0 ){
+          p = 0;
+          break;
         }
         p++;
         if( *p==0 ) p = 0;
@@ -576,7 +579,7 @@ int sqlite3Fts5ConfigParse(
   sqlite3_int64 nByte;
   int bUnindexed = 0;             /* True if there are one or more UNINDEXED */
 
-  *ppOut = pRet = (Fts5Config*)sqlite3_malloc(sizeof(Fts5Config));
+  *ppOut = pRet = (Fts5Config*)sqlite3_malloc64(sizeof(Fts5Config));
   if( pRet==0 ) return SQLITE_NOMEM;
   memset(pRet, 0, sizeof(Fts5Config));
   pRet->pGlobal = pGlobal;
@@ -762,7 +765,7 @@ int sqlite3Fts5ConfigDeclareVtab(Fts5Config *pConfig){
     const char *zSep = (i==0?"":", ");
     zSql = sqlite3Fts5Mprintf(&rc, "%z%s%Q", zSql, zSep, pConfig->azCol[i]);
   }
-  zSql = sqlite3Fts5Mprintf(&rc, "%z, %Q HIDDEN, %s HIDDEN)", 
+  zSql = sqlite3Fts5Mprintf(&rc, "%z, %Q BLOB HIDDEN, %s HIDDEN)", 
       zSql, pConfig->zName, FTS5_RANK_NAME
   );
 
@@ -1065,7 +1068,9 @@ int sqlite3Fts5ConfigLoad(Fts5Config *pConfig, int iCookie){
 
   zSql = sqlite3Fts5Mprintf(&rc, zSelect, pConfig->zDb, pConfig->zName);
   if( zSql ){
-    rc = sqlite3_prepare_v2(pConfig->db, zSql, -1, &p, 0);
+    rc = sqlite3_prepare_v3(
+        pConfig->db, zSql, -1, SQLITE_PREPARE_FROM_DDL, &p, 0
+    );
     sqlite3_free(zSql);
   }
 
@@ -1115,7 +1120,7 @@ void sqlite3Fts5ConfigErrmsg(Fts5Config *pConfig, const char *zFmt, ...){
   va_start(ap, zFmt);
   zMsg = sqlite3_vmprintf(zFmt, ap);
   if( pConfig->pzErrmsg ){
-    assert( *pConfig->pzErrmsg==0 );
+    sqlite3_free(*pConfig->pzErrmsg);
     *pConfig->pzErrmsg = zMsg;
   }else{
     sqlite3_free(zMsg);
@@ -1123,5 +1128,3 @@ void sqlite3Fts5ConfigErrmsg(Fts5Config *pConfig, const char *zFmt, ...){
 
   va_end(ap);
 }
-
-

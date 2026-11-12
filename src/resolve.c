@@ -462,8 +462,15 @@ static int lookupName(
           }
           cnt++;
           pMatch = pItem;
-          /* Substitute the rowid (column -1) for the INTEGER PRIMARY KEY */
-          pExpr->iColumn = j==pTab->iPKey ? -1 : (i16)j;
+          /* Substitute the rowid (column -1) for the INTEGER PRIMARY KEY.
+          ** Except when parsing for ALTER TABLE. In that case leave 
+          ** Expr.iColumn set to iCol so that it can be distinguished from 
+          ** literal "rowid" references. */
+          if( j==pTab->iPKey && !IN_RENAME_OBJECT ){
+            pExpr->iColumn = -1;
+          }else{
+            pExpr->iColumn = (i16)j;
+          }
           if( pItem->fg.isNestedFrom ){
             sqlite3SrcItemColumnUsed(pItem, j);
           }
@@ -549,6 +556,9 @@ static int lookupName(
         if( pUpsert && sqlite3StrICmp("excluded",zTab)==0 ){
           pTab = pUpsert->pUpsertSrc->a[0].pSTab;
           pExpr->iTable = EXCLUDED_TABLE_NUMBER;
+          if( IN_RENAME_OBJECT ){
+            sqlite3RenameTokenRemap(pParse, 0, (void*)&pExpr->y.pTab);
+          }
         }
       }
 #endif /* SQLITE_OMIT_UPSERT */
@@ -559,7 +569,7 @@ static int lookupName(
         cntTab++;
         iCol = sqlite3ColumnIndex(pTab, zCol);
         if( iCol>=0 ){
-          if( pTab->iPKey==iCol ) iCol = -1;
+          if( pTab->iPKey==iCol && !IN_RENAME_OBJECT ) iCol = -1;
         }else{
           if( sqlite3IsRowid(zCol) && VisibleRowid(pTab) ){
             iCol = -1;
@@ -754,7 +764,7 @@ static int lookupName(
   ** cnt>1 means there were two or more matches.
   **
   ** cnt==0 is always an error.  cnt>1 is often an error, but might
-  ** be multiple matches for a NATURAL LEFT JOIN or a LEFT JOIN USING.
+  ** be multiple matches for a NATURAL OUTER JOIN or a OUTER JOIN USING.
   */
   assert( pFJMatch==0 || cnt>0 );
   assert( !ExprHasProperty(pExpr, EP_xIsSelect|EP_IntValue) );
@@ -774,6 +784,7 @@ static int lookupName(
         pExpr->op = TK_FUNCTION;
         pExpr->u.zToken = "coalesce";
         pExpr->x.pList = pFJMatch;
+        pExpr->affExpr = SQLITE_AFF_DEFER;
         cnt = 1;
         goto lookupname_end;
       }else{
@@ -836,11 +847,20 @@ lookupname_end:
   if( cnt==1 ){
     assert( pNC!=0 );
 #ifndef SQLITE_OMIT_AUTHORIZATION
-    if( pParse->db->xAuth
-     && (pExpr->op==TK_COLUMN || pExpr->op==TK_TRIGGER)
-    ){
-      sqlite3AuthRead(pParse, pExpr, pSchema, pNC->pSrcList);
-    }
+    if( db->xAuth ){
+      if( pFJMatch ){
+        assert( pExpr->op==TK_FUNCTION );
+        assert( sqlite3_stricmp(pExpr->u.zToken,"coalesce")==0 );
+        assert( pExpr->x.pList==pFJMatch );
+        assert( pFJMatch->nExpr>0 );
+        for(i=0; i<pFJMatch->nExpr; i++){
+          assert( pFJMatch->a[i].pExpr->op==TK_COLUMN );
+          sqlite3AuthRead(pParse,pFJMatch->a[i].pExpr,pSchema,pNC->pSrcList);
+        }
+      }else if( pExpr->op==TK_COLUMN || pExpr->op==TK_TRIGGER ){
+        sqlite3AuthRead(pParse, pExpr, pSchema, pNC->pSrcList);
+      }
+    } 
 #endif
     /* Increment the nRef value on all name contexts from TopNC up to
     ** the point where the name matched. */
@@ -936,10 +956,43 @@ static int exprProbability(Expr *p){
   double r = -1.0;
   if( p->op!=TK_FLOAT ) return -1;
   assert( !ExprHasProperty(p, EP_IntValue) );
-  sqlite3AtoF(p->u.zToken, &r, sqlite3Strlen30(p->u.zToken), SQLITE_UTF8);
+  sqlite3AtoF(p->u.zToken, &r);
   assert( r>=0.0 );
   if( r>1.0 ) return -1;
   return (int)(r*134217728.0);
+}
+
+/*
+** Set the EP_SubtArg property on every expression inside of
+** pList.  If any subexpression is actually a subquery, then
+** also set the EP_SubtArg property on the first result-set
+** column of that subquery.
+*/
+static SQLITE_NOINLINE void resolveSetExprSubtypeArg(ExprList *pList){
+  int nn, ii;
+  nn = pList ? pList->nExpr : 0;
+  for(ii=0; ii<nn; ii++){
+    Expr *pExpr = pList->a[ii].pExpr;
+    while( 1 /*exit-by-break*/ ){
+      ExprSetProperty(pExpr, EP_SubtArg);
+      if( pExpr->op==TK_SELECT ){
+        assert( ExprUseXSelect(pExpr) );
+        assert( pExpr->x.pSelect!=0 );
+        resolveSetExprSubtypeArg(pExpr->x.pSelect->pEList);
+        break;
+      }
+      if( pExpr->op==TK_UPLUS ){
+        pExpr = pExpr->pLeft;
+        assert( pExpr!=0 );
+      }else if( pExpr->op==TK_CASE ){
+        assert( ExprUseXList(pExpr) );
+        resolveSetExprSubtypeArg(pExpr->x.pList);
+        break;
+      }else{
+        break;
+      }
+    }
+  }
 }
 
 /*
@@ -1186,10 +1239,7 @@ static int resolveExprStep(Walker *pWalker, Expr *pExpr){
         if( (pDef->funcFlags & SQLITE_SUBTYPE) 
          || ExprHasProperty(pExpr, EP_SubtArg) 
         ){
-          int ii;
-          for(ii=0; ii<n; ii++){
-            ExprSetProperty(pList->a[ii].pExpr, EP_SubtArg);
-          }
+          resolveSetExprSubtypeArg(pList);
         }
 
         if( pDef->funcFlags & (SQLITE_FUNC_CONSTANT|SQLITE_FUNC_SLOCHNG) ){
@@ -1219,8 +1269,13 @@ static int resolveExprStep(Walker *pWalker, Expr *pExpr){
           /* Internal-use-only functions are disallowed unless the
           ** SQL is being compiled using sqlite3NestedParse() or
           ** the SQLITE_TESTCTRL_INTERNAL_FUNCTIONS test-control has be
-          ** used to activate internal functions for testing purposes */
-          no_such_func = 1;
+          ** used to activate internal functions for testing purposes.
+          **
+          ** The 2 value for no_such_func means that the function is
+          ** an internal-use-only function which should be treated as a
+          ** non-existant function for name resolution purposes.
+          */
+          no_such_func = 2;
           pDef = 0;
         }else
         if( (pDef->funcFlags & (SQLITE_FUNC_DIRECT|SQLITE_FUNC_UNSAFE))!=0
@@ -1264,9 +1319,16 @@ static int resolveExprStep(Walker *pWalker, Expr *pExpr){
           is_agg = 0;
         }
 #endif
-        else if( no_such_func && pParse->db->init.busy==0
+        else if( no_such_func
+              && (pParse->db->init.busy==0 ||
+                  (no_such_func==2 && pParse->db->init.busy==2))
+              /* Suppress "no such function" errors when reading
+              ** the sqlite_schema table.  Except, do raise the error
+              ** if init.busy is 2, meaning the schema parse is due
+              ** to an ALTER TABLE ADD COLUMN statement, and the function
+              ** is an internal-use-only function (no_such_func==2). */
 #ifdef SQLITE_ENABLE_UNKNOWN_SQL_FUNCTION
-                  && pParse->explain==0
+              && pParse->explain==0
 #endif
         ){
           sqlite3ErrorMsg(pParse, "no such function: %#T", pExpr);
@@ -1523,7 +1585,7 @@ static int resolveOrderByTermToExprList(
   int rc;            /* Return code from subprocedures */
   u8 savedSuppErr;   /* Saved value of db->suppressErr */
 
-  assert( sqlite3ExprIsInteger(pE, &i, 0)==0 );
+  assert( sqlite3ExprIsInteger(pE, &i, 0, 1)==0 );
   pEList = pSelect->pEList;
 
   /* Resolve all names in the ORDER BY term expression
@@ -1553,6 +1615,29 @@ static int resolveOrderByTermToExprList(
 
   /* If no match, return 0. */
   return 0;
+}
+
+/*
+** ORDER BY term pE, a simple identifier, has been matched by resolveAsName()
+** against the iCol-th (1-based) entry of result-set pEList. If this is an
+** ALTER TABLE rename, and the name of that entry was generated by expanding
+** "*" or "tbl.*", then modify pE to refer to the table column directly.
+*/
+static void resolveRenameStarTerm(
+  Parse *pParse,     /* Parsing context */
+  ExprList *pEList,  /* Result-set that pE was matched against */
+  int iCol,          /* 1-based index of the matching pEList entry */
+  Expr *pE           /* ORDER BY term to convert */
+){
+  if( IN_RENAME_OBJECT && pEList->a[iCol-1].fg.bStarName ){
+    Expr *pX = pEList->a[iCol-1].pExpr;
+    if( ALWAYS(pX->op==TK_COLUMN) && ALWAYS(pE->op==TK_ID) ){
+      pE->op = TK_COLUMN;
+      pE->iTable = pX->iTable;
+      pE->iColumn = pX->iColumn;
+      pE->y.pTab = pX->y.pTab;
+    }
+  }
 }
 
 /*
@@ -1622,14 +1707,16 @@ static int resolveCompoundOrderBy(
       if( pItem->fg.done ) continue;
       pE = sqlite3ExprSkipCollateAndLikely(pItem->pExpr);
       if( NEVER(pE==0) ) continue;
-      if( sqlite3ExprIsInteger(pE, &iCol, 0) ){
+      if( sqlite3ExprIsInteger(pE, &iCol, 0, 1) ){
         if( iCol<=0 || iCol>pEList->nExpr ){
           resolveOutOfRangeError(pParse, "ORDER", i+1, pEList->nExpr, pE);
           return 1;
         }
       }else{
         iCol = resolveAsName(pParse, pEList, pE);
-        if( iCol==0 ){
+        if( iCol>0 ){
+          resolveRenameStarTerm(pParse, pEList, iCol, pE);
+        }else{
           /* Now test if expression pE matches one of the values returned
           ** by pSelect. In the usual case this is done by duplicating the
           ** expression, resolving any symbols in it, and then comparing
@@ -1797,6 +1884,7 @@ static int resolveOrderGroupBy(
     if( zType[0]!='G' ){
       iCol = resolveAsName(pParse, pSelect->pEList, pE2);
       if( iCol>0 ){
+        resolveRenameStarTerm(pParse, pSelect->pEList, iCol, pE2);
         /* If an AS-name match is found, mark this ORDER BY column as being
         ** a copy of the iCol-th result-set column.  The subsequent call to
         ** sqlite3ResolveOrderGroupBy() will convert the expression to a
@@ -1805,7 +1893,7 @@ static int resolveOrderGroupBy(
         continue;
       }
     }
-    if( sqlite3ExprIsInteger(pE2, &iCol, 0) ){
+    if( sqlite3ExprIsInteger(pE2, &iCol, 0, 1) ){
       /* The ORDER BY term is an integer constant.  Again, set the column
       ** number so that sqlite3ResolveOrderGroupBy() will convert the
       ** order-by term to a copy of the result-set expression */
@@ -2071,6 +2159,14 @@ static int resolveSelectStep(Walker *pWalker, Select *p){
     if( p->pNext && p->pEList->nExpr!=p->pNext->pEList->nExpr ){
       sqlite3SelectWrongNumTermsError(pParse, p->pNext);
       return WRC_Abort;
+    }
+
+    /* If the SELECT statement contains ON clauses that were moved into
+    ** the WHERE clause, go through and verify that none of the terms
+    ** in the ON clauses reference tables to the right of the ON clause. */
+    if( (p->selFlags & SF_OnToWhere) ){
+      sqlite3SelectCheckOnClauses(pParse, p);
+      if( pParse->nErr ) return WRC_Abort;
     }
 
     /* Advance to the next term of the compound

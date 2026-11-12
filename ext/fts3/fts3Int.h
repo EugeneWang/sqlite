@@ -203,7 +203,16 @@ typedef sqlite3_int64 i64;        /* 8-byte signed integer */
 #define LARGEST_INT64  (0xffffffff|(((i64)0x7fffffff)<<32))
 #define SMALLEST_INT64 (((i64)-1) - LARGEST_INT64)
 
-#define deliberate_fall_through
+#if !defined(deliberate_fall_through)
+# if defined(__has_attribute)
+#  if __has_attribute(fallthrough)
+#    define deliberate_fall_through __attribute__((fallthrough));
+#  endif
+# endif
+#endif
+#if !defined(deliberate_fall_through)
+# define deliberate_fall_through
+#endif
 
 /*
 ** Macros needed to provide flexible arrays in a portable way
@@ -305,8 +314,8 @@ struct Fts3Table {
     int nPrefix;                  /* Prefix length (0 for main terms index) */
     Fts3Hash hPending;            /* Pending terms table for this index */
   } *aIndex;
-  int nMaxPendingData;            /* Max pending data before flush to disk */
-  int nPendingData;               /* Current bytes of pending data */
+  sqlite_int64 nMaxPendingData;   /* Max pending data before flush to disk */
+  sqlite_int64 nPendingData;      /* Current bytes of pending data */
   sqlite_int64 iPrevDocid;        /* Docid of most recently inserted document */
   int iPrevLangid;                /* Langid of recently inserted document */
   int bPrevDelete;                /* True if last operation was a delete */
@@ -601,6 +610,15 @@ int sqlite3Fts3Incrmerge(Fts3Table*,int,int);
   (*(u8*)(p)&0x80) ? sqlite3Fts3GetVarint32(p, piVal) : (*piVal=*(u8*)(p), 1) \
 )
 
+int sqlite3Fts3PrepareStmt(
+  Fts3Table *p,                   /* Prepare for this connection */
+  const char *zSql,               /* SQL to prepare */
+  int bPersist,                   /* True to set SQLITE_PREPARE_PERSISTENT */
+  int bAllowVtab,                 /* True to omit SQLITE_PREPARE_NO_VTAB */
+  sqlite3_stmt **pp               /* OUT: Prepared statement */
+);
+
+
 /* fts3.c */
 void sqlite3Fts3ErrMsg(char**,const char*,...);
 int sqlite3Fts3PutVarint(char *, sqlite3_int64);
@@ -616,6 +634,9 @@ int sqlite3Fts3FirstFilter(sqlite3_int64, char *, int, char *);
 void sqlite3Fts3CreateStatTable(int*, Fts3Table*);
 int sqlite3Fts3EvalTestDeferred(Fts3Cursor *pCsr, int *pRc);
 int sqlite3Fts3ReadInt(const char *z, int *pnOut);
+int sqlite3Fts3CreateHashFunction(sqlite3*, const char*, int, int, Fts3Hash*,
+    void (*)(sqlite3_context*,int,sqlite3_value**)
+);
 
 /* fts3_tokenizer.c */
 const char *sqlite3Fts3NextToken(const char *, int *);

@@ -1582,6 +1582,7 @@ TESTEXT = \
   $(TOP)\ext\misc\closure.c \
   $(TOP)\ext\misc\csv.c \
   $(TOP)\ext\misc\decimal.c \
+  $(TOP)\ext\misc\diskused.c\
   $(TOP)\ext\misc\eval.c \
   $(TOP)\ext\misc\explain.c \
   $(TOP)\ext\misc\fileio.c \
@@ -1593,6 +1594,7 @@ TESTEXT = \
   $(TOP)\ext\misc\mmapwarm.c \
   $(TOP)\ext\misc\nextchar.c \
   $(TOP)\ext\misc\normalize.c \
+  $(TOP)\ext\misc\optname.c \
   $(TOP)\ext\misc\prefixes.c \
   $(TOP)\ext\misc\qpvtab.c \
   $(TOP)\ext\misc\randomjson.c \
@@ -1601,7 +1603,9 @@ TESTEXT = \
   $(TOP)\ext\misc\series.c \
   $(TOP)\ext\misc\spellfix.c \
   $(TOP)\ext\misc\stmtrand.c \
+  $(TOP)\ext\misc\strdup.c \
   $(TOP)\ext\misc\totype.c \
+  $(TOP)\ext\misc\tryeval.c \
   $(TOP)\ext\misc\unionvtab.c \
   $(TOP)\ext\misc\wholenumber.c \
   $(TOP)\ext\rtree\test_rtreedoc.c \
@@ -1677,8 +1681,6 @@ EXTHDR = $(EXTHDR) \
 TESTPROGS = \
   testfixture.exe \
   $(SQLITE3EXE) \
-  sqlite3_analyzer.exe \
-  sqlite3_checker.exe \
   sqldiff.exe \
   dbhash.exe \
   sqltclsh.exe
@@ -1719,6 +1721,7 @@ FUZZERSHELL_COMPILE_OPTS =
 FUZZCHECK_OPTS = $(FUZZCHECK_OPTS) -I$(TOP)\test -I$(TOP)\ext\recover
 FUZZCHECK_OPTS = $(FUZZCHECK_OPTS) -DSQLITE_ENABLE_MEMSYS5
 FUZZCHECK_OPTS = $(FUZZCHECK_OPTS) -DSQLITE_OSS_FUZZ
+FUZZCHECK_OPTS = $(FUZZCHECK_OPTS) -DSQLITE_DECIMAL_MAX_DIGIT=1000
 FUZZCHECK_OPTS = $(FUZZCHECK_OPTS) -DSQLITE_ENABLE_BYTECODE_VTAB
 FUZZCHECK_OPTS = $(FUZZCHECK_OPTS) -DSQLITE_ENABLE_CARRAY
 FUZZCHECK_OPTS = $(FUZZCHECK_OPTS) -DSQLITE_ENABLE_DBPAGE_VTAB
@@ -1765,7 +1768,19 @@ FUZZCHECK_SRC = $(FUZZCHECK_SRC) $(TOP)\test\fuzzinvariants.c
 FUZZCHECK_SRC = $(FUZZCHECK_SRC) $(TOP)\test\vt02.c
 FUZZCHECK_SRC = $(FUZZCHECK_SRC) $(TOP)\ext\recover\dbdata.c
 FUZZCHECK_SRC = $(FUZZCHECK_SRC) $(TOP)\ext\recover\sqlite3recover.c
+FUZZCHECK_SRC = $(FUZZCHECK_SRC) $(TOP)\ext\misc\base64.c
+FUZZCHECK_SRC = $(FUZZCHECK_SRC) $(TOP)\ext\misc\base85.c
+FUZZCHECK_SRC = $(FUZZCHECK_SRC) $(TOP)\ext\misc\completion.c
+FUZZCHECK_SRC = $(FUZZCHECK_SRC) $(TOP)\ext\misc\decimal.c
+FUZZCHECK_SRC = $(FUZZCHECK_SRC) $(TOP)\ext\misc\diskused.c
+FUZZCHECK_SRC = $(FUZZCHECK_SRC) $(TOP)\ext\misc\ieee754.c
 FUZZCHECK_SRC = $(FUZZCHECK_SRC) $(TOP)\ext\misc\randomjson.c
+FUZZCHECK_SRC = $(FUZZCHECK_SRC) $(TOP)\ext\misc\regexp.c
+FUZZCHECK_SRC = $(FUZZCHECK_SRC) $(TOP)\ext\misc\series.c
+FUZZCHECK_SRC = $(FUZZCHECK_SRC) $(TOP)\ext\misc\shathree.c
+FUZZCHECK_SRC = $(FUZZCHECK_SRC) $(TOP)\ext\misc\sha1.c
+FUZZCHECK_SRC = $(FUZZCHECK_SRC) $(TOP)\ext\misc\stmtrand.c
+FUZZCHECK_SRC = $(FUZZCHECK_SRC) $(TOP)\ext\misc\strdup.c
 
 OSSSHELL_SRC = $(TOP)\test\ossshell.c $(TOP)\test\ossfuzz.c
 DBFUZZ_COMPILE_OPTS = -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION
@@ -1866,14 +1881,15 @@ $(SQLITE3EXE):	shell.c $(SHELL_CORE_DEP) $(LIBRESOBJS) $(SHELL_CORE_SRC) $(SQLIT
 		/link $(SQLITE3EXEPDB) $(LDFLAGS) $(LTLINKOPTS) $(SHELL_LINK_OPTS) $(LTLIBPATHS) $(LIBRESOBJS) $(LIBREADLINE) $(LTLIBS) $(TLIBS)
 
 # <<mark>>
-sqldiff.exe:	$(TOP)\tool\sqldiff.c $(TOP)\ext\misc\sqlite3_stdio.h $(TOP)\ext\misc\sqlite3_stdio.c $(SQLITE3C) $(SQLITE3H) $(LIBRESOBJS)
-	$(LTLINK) $(NO_WARN) -I$(TOP)\ext\misc $(TOP)\tool\sqldiff.c $(TOP)\ext\misc\sqlite3_stdio.c $(SQLITE3C) /link $(LDFLAGS) $(LTLINKOPTS) $(LIBRESOBJS)
+sqldiff.exe:	$(TOP)\tool\sqldiff.c $(TOP)\ext\misc\sqlite3_stdio.h $(TOP)\ext\misc\sqlite3_stdio.c $(SQLITE3C) $(SQLITE3H) $(LIBRESOBJS) $(TOP)\tool\winmain.c
+	$(LTLINK) $(NO_WARN) -I$(TOP)\ext\misc $(TOP)\tool\sqldiff.c $(TOP)\ext\misc\sqlite3_stdio.c $(TOP)\tool\winmain.c $(SQLITE3C) /link $(LDFLAGS) $(LTLINKOPTS) $(LIBRESOBJS)
 
 dbhash.exe:	$(TOP)\tool\dbhash.c $(SQLITE3C) $(SQLITE3H)
 	$(LTLINK) $(NO_WARN) $(TOP)\tool\dbhash.c $(SQLITE3C) /link $(LDFLAGS) $(LTLINKOPTS)
 
 RSYNC_SRC = \
   $(TOP)\tool\sqlite3_rsync.c \
+  $(TOP)\tool\winmain.c \
   $(SQLITE3C)
 
 RSYNC_OPT = \
@@ -1884,9 +1900,6 @@ RSYNC_OPT = \
 
 sqlite3_rsync.exe:	$(RSYNC_SRC) $(LIBRESOBJS)
 	$(LTLINK) $(RSYNC_OPT) $(NO_WARN) $(RSYNC_SRC) /link $(LDFLAGS) $(LTLINKOPTS) $(LIBRESOBJS)
-
-scrub.exe:	$(TOP)\ext\misc\scrub.c $(SQLITE3C) $(SQLITE3H)
-	$(LTLINK) $(NO_WARN) -DSCRUB_STANDALONE=1 $(TOP)\ext\misc\scrub.c $(SQLITE3C) /link $(LDFLAGS) $(LTLINKOPTS)
 
 srcck1.exe:	$(TOP)\tool\srcck1.c
 	$(BCC) $(NO_WARN) -Fe$@ $(TOP)\tool\srcck1.c
@@ -2336,6 +2349,7 @@ SHELL_DEP = \
     $(TOP)\ext\misc\base85.c \
     $(TOP)\ext\misc\completion.c \
     $(TOP)\ext\misc\decimal.c \
+    $(TOP)\ext\misc\diskused.c \
     $(TOP)\ext\misc\fileio.c \
     $(TOP)\ext\misc\ieee754.c \
     $(TOP)\ext\misc\memtrace.c \
@@ -2462,6 +2476,36 @@ fts5_ext.lo:	fts5.c $(HDR) $(EXTHDR)
 fts5.dll:	fts5_ext.lo
 	$(LD) $(LDFLAGS) $(LTLINKOPTS) $(LTLIBPATHS) /DLL /OUT:$@ fts5_ext.lo
 
+# vec1 loadable extension.
+#
+# If VEC1_AVX2 is non-zero (the default, except when targeting ARM),
+# vec1.c is compiled twice - once with scalar code and once with AVX2 -
+# and both objects linked into a single DLL that picks one at runtime
+# based on the CPU. Otherwise a single scalar-only build is done.
+#
+!IFNDEF VEC1_AVX2
+!IF "$(PLATFORM)"=="arm" || "$(PLATFORM)"=="ARM" || "$(PLATFORM)"=="arm64" || "$(PLATFORM)"=="ARM64"
+VEC1_AVX2 = 0
+!ELSEIF "$(VSCMD_ARG_TGT_ARCH)"=="arm" || "$(VSCMD_ARG_TGT_ARCH)"=="arm64"
+VEC1_AVX2 = 0
+!ELSE
+VEC1_AVX2 = 1
+!ENDIF
+!ENDIF
+
+VEC1_SRC = $(TOP)\ext\vec1\vec1.c
+
+!IF $(VEC1_AVX2)!=0
+vec1.dll:	$(VEC1_SRC) $(SQLITE3H)
+	$(TCC) -DVEC1SIMD=SCALAR -Fovec1scalar.lo -Fdvec1.pdb -c $(VEC1_SRC)
+	$(TCC) -DVEC1SIMD=AVX2 -arch:AVX2 -Fovec1avx2.lo -Fdvec1.pdb -c $(VEC1_SRC)
+	$(LD) $(LDFLAGS) $(LTLINKOPTS) $(LTLIBPATHS) /DLL /OUT:$@ vec1scalar.lo vec1avx2.lo
+!ELSE
+vec1.dll:	$(VEC1_SRC) $(SQLITE3H)
+	$(TCC) -Fovec1.lo -Fdvec1.pdb -c $(VEC1_SRC)
+	$(LD) $(LDFLAGS) $(LTLINKOPTS) $(LTLIBPATHS) /DLL /OUT:$@ vec1.lo
+!ENDIF
+
 sqlite3rbu.lo:	$(TOP)\ext\rbu\sqlite3rbu.c $(HDR) $(EXTHDR)
 	$(LTCOMPILE) -DSQLITE_CORE -c $(TOP)\ext\rbu\sqlite3rbu.c
 
@@ -2530,53 +2574,29 @@ extensiontest:	testfixture.exe testloadext.dll
 	@set PATH=$(LIBTCLPATH);$(PATH)
 	.\testfixture.exe $(TOP)\test\loadext.test $(TESTOPTS)
 
-tool-zip:	testfixture.exe sqlite3.exe sqldiff.exe sqlite3_analyzer.exe sqlite3_rsync.exe sqlite3.dll $(TOP)\tool\mktoolzip.tcl
+tool-zip:	testfixture.exe sqlite3.exe sqldiff.exe sqlite3_rsync.exe sqlite3.dll $(TOP)\tool\mktoolzip.tcl
 	.\testfixture.exe $(TOP)\tool\mktoolzip.tcl
 
-snapshot-zip:	testfixture.exe sqlite3.exe sqldiff.exe sqlite3_analyzer.exe sqlite3_rsync.exe sqlite3.dll $(TOP)\tool\mktoolzip.tcl
+snapshot-zip:	testfixture.exe sqlite3.exe sqldiff.exe sqlite3_rsync.exe sqlite3.dll $(TOP)\tool\mktoolzip.tcl
 	.\testfixture.exe $(TOP)\tool\mktoolzip.tcl --snapshot
 
 coretestprogs:	testfixture.exe sqlite3.exe
 
 testprogs:	$(TESTPROGS) srcck1.exe fuzzcheck.exe sessionfuzz.exe
 
-fulltest:	alltest fuzztest
-
-alltest:	$(TESTPROGS)
-	@set PATH=$(LIBTCLPATH);$(PATH)
-	.\testfixture.exe $(TOP)\test\all.test $(TESTOPTS)
-
-soaktest:	$(TESTPROGS)
-	@set PATH=$(LIBTCLPATH);$(PATH)
-	.\testfixture.exe $(TOP)\test\all.test -soak=1 $(TESTOPTS)
-
-fulltestonly:	$(TESTPROGS) fuzztest
-	@set PATH=$(LIBTCLPATH);$(PATH)
-	.\testfixture.exe $(TOP)\test\full.test
-
-queryplantest:	testfixture.exe shell
-	@set PATH=$(LIBTCLPATH);$(PATH)
-	.\testfixture.exe $(TOP)\test\permutations.test queryplanner $(TESTOPTS)
-
 fuzztest:	fuzzcheck.exe
 	.\fuzzcheck.exe $(FUZZDATA)
 
-# Legacy testing target for third-party integrators.  The SQLite
-# developers seldom use this target themselves.  Instead
-# they use "nmake /f Makefile.msc devtest" which runs tests on
-# a standard set of options
 #
-test:	$(TESTPROGS) sourcetest fuzztest tcltest
-
-# Minimal testing that runs in less than 3 minutes (on a fast machine)
+# Legacy testing targets, no longer used by the developers and
+# now aliased to one of the commonly used testing targets.
 #
-quicktest:	testfixture.exe sourcetest
-	@set PATH=$(LIBTCLPATH);$(PATH)
-	.\testfixture.exe $(TOP)\test\extraquick.test $(TESTOPTS)
-
-# This is the common case.  Run many tests that do not take too long,
-# including fuzzcheck, sqlite3_analyzer, and sqldiff tests.
-#
+quicktest:	devtest
+test:	devtest
+fulltest:	releasetest
+alltest:	releasetest
+soaktest:	releasetest
+fulltestonly:	releasetest
 
 # The veryquick.test TCL tests.
 #
@@ -2596,10 +2616,15 @@ testrunner:	testfixture.exe
 # Probably other tests too, but at least this one.
 #
 devtest:	srctree-check sourcetest
-	$(TCLSH_CMD) $(TOP)\test\testrunner.tcl mdevtest
+	$(TCLSH_CMD) $(TOP)\test\testrunner.tcl mdevtest --stop-on-error
 
 mdevtest:
 	$(TCLSH_CMD) $(TOP)\test\testrunner.tcl mdevtest
+
+# Rerun test cases that failed on the previous testrunner invocation
+#
+retest:
+	$(TCLSH_CMD) $(TOP)\test\testrunner.tcl retest --stop-on-error
 
 # Show all errors from the most reason testrunner invocation
 #
@@ -2635,8 +2660,14 @@ smoketest:	$(TESTPROGS)
 	@set PATH=$(LIBTCLPATH);$(PATH)
 	.\testfixture.exe $(TOP)\test\main.test $(TESTOPTS)
 
-shelltest: $(TESTPROGS)
-	.\testfixture.exe $(TOP)\test\permutations.test shell
+# Measure the performance of floating-point conversions.
+#
+fp-speed-test:	fp-speed-1.exe fp-speed-2.exe
+	fp-speed-1 1000000
+	fp-speed-2 1000000
+
+shelltest:
+	$(TCLSH_CMD) $(TOP)\test\testrunner.tcl release shell
 
 sqlite3_analyzer.c:	$(SQLITE3C) $(SQLITE3H) tclsqlite-ex.c $(TOP)\tool\spaceanal.tcl $(TOP)\tool\mkccode.tcl $(TOP)\tool\sqlite3_analyzer.c.in $(TOP)\ext\misc\sqlite3_stdio.h $(TOP)\ext\misc\sqlite3_stdio.c $(SQLITE_TCL_DEP)
 	$(TCLSH_CMD) $(TOP)\tool\mkccode.tcl -DINCLUDE_SQLITE3_C $(TOP)\tool\sqlite3_analyzer.c.in > $@
@@ -2654,23 +2685,6 @@ sqltclsh.exe: sqltclsh.c  $(SHELL_CORE_DEP) $(LIBRESOBJS)
 
 sqlite3_expert.exe: $(SQLITE3C) $(TOP)\ext\expert\sqlite3expert.h $(TOP)\ext\expert\sqlite3expert.c $(TOP)\ext\expert\expert.c
 	$(LTLINK) $(NO_WARN)	$(TOP)\ext\expert\sqlite3expert.c $(TOP)\ext\expert\expert.c $(SQLITE3C) $(TLIBS)
-
-CHECKER_DEPS =\
-  $(TOP)\tool\mkccode.tcl \
-  sqlite3.c \
-  tclsqlite-ex.c \
-  $(TOP)\ext\repair\sqlite3_checker.tcl \
-  $(TOP)\ext\repair\checkindex.c \
-  $(TOP)\ext\repair\checkfreelist.c \
-  $(TOP)\ext\misc\btreeinfo.c \
-  $(TOP)\ext\repair\sqlite3_checker.c.in
-
-sqlite3_checker.c:	$(CHECKER_DEPS)
-	$(TCLSH_CMD) $(TOP)\tool\mkccode.tcl $(TOP)\ext\repair\sqlite3_checker.c.in > $@
-
-sqlite3_checker.exe:	sqlite3_checker.c $(LIBRESOBJS)
-	$(LTLINK) $(NO_WARN) -DBUILD_sqlite -I$(TCLINCDIR) sqlite3_checker.c \
-		/link $(LDFLAGS) $(LTLINKOPTS) $(TCLLIBPATHS) $(LTLIBPATHS) $(LIBRESOBJS) $(TCLLIBS) $(LTLIBS) $(TLIBS)
 
 dbdump.exe:	$(TOP)\ext\misc\dbdump.c $(SQLITE3C) $(SQLITE3H) $(LIBRESOBJS)
 	$(LTLINK) $(NO_WARN) -DDBDUMP_STANDALONE $(TOP)\ext\misc\dbdump.c $(SQLITE3C) \
@@ -2703,6 +2717,9 @@ showwal.exe:	$(TOP)\tool\showwal.c $(SQLITE3C) $(SQLITE3H)
 
 showshm.exe:	$(TOP)\tool\showshm.c
 	$(LTLINK) $(NO_WARN)	$(TOP)\tool\showshm.c /link $(LDFLAGS) $(LTLINKOPTS)
+
+showtmlog.exe:	$(TOP)\tool\showtmlog.c
+	$(LTLINK) $(NO_WARN)	$(TOP)\tool\showtmlog.c /link $(LDFLAGS) $(LTLINKOPTS)
 
 index_usage.exe: $(TOP)\tool\index_usage.c $(SQLITE3C) $(SQLITE3H)
 	$(LTLINK) $(NO_WARN) -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION \
@@ -2741,6 +2758,14 @@ speedtest1.exe:	$(TOP)\test\speedtest1.c $(SQLITE3C) $(SQLITE3H)
 	$(LTLINK) $(NO_WARN) $(ST_COMPILE_OPTS) -DSQLITE_OMIT_LOAD_EXTENSION \
 		$(TOP)\test\speedtest1.c $(SQLITE3C) /link $(LDFLAGS) $(LTLINKOPTS)
 
+fp-speed-1.exe:	$(TOP)\test\fp-speed-1.c $(SQLITE3C) $(SQLITE3H)
+	$(LTLINK) $(NO_WARN) $(ST_COMPILE_OPTS) -DSQLITE_OMIT_LOAD_EXTENSION \
+		$(TOP)\test\fp-speed-1.c $(SQLITE3C) /link $(LDFLAGS) $(LTLINKOPTS)
+
+fp-speed-2.exe:	$(TOP)\test\fp-speed-2.c $(SQLITE3C) $(SQLITE3H)
+	$(LTLINK) $(NO_WARN) $(ST_COMPILE_OPTS) -DSQLITE_OMIT_LOAD_EXTENSION \
+		$(TOP)\test\fp-speed-2.c $(SQLITE3C) /link $(LDFLAGS) $(LTLINKOPTS)
+
 kvtest.exe:	$(TOP)\test\kvtest.c $(SQLITE3C) $(SQLITE3H)
 	$(LTLINK) $(NO_WARN) $(KV_COMPILE_OPTS) \
 		$(TOP)\test\kvtest.c $(SQLITE3C) /link $(LDFLAGS) $(LTLINKOPTS)
@@ -2748,6 +2773,9 @@ kvtest.exe:	$(TOP)\test\kvtest.c $(SQLITE3C) $(SQLITE3H)
 rbu.exe:	$(TOP)\ext\rbu\rbu.c $(TOP)\ext\rbu\sqlite3rbu.c $(SQLITE3C) $(SQLITE3H)
 	$(LTLINK) $(NO_WARN) -DSQLITE_ENABLE_RBU \
 		$(TOP)\ext\rbu\rbu.c $(SQLITE3C) /link $(LDFLAGS) $(LTLINKOPTS)
+
+$(AUXTEST).exe:	$(TOP)\test\c\$(AUXTEST).c
+	$(LTLINK) $(NO_WARN) $(TOP)\test\c\$(AUXTEST).c sqlite3.lo /link $(LDFLAGS) $(LTLINKOPTS)
 
 THREADTEST3_SRC = \
   $(TOP)\test\threadtest3.c \
@@ -2759,6 +2787,21 @@ THREADTEST3_SRC = \
 
 threadtest3.exe: $(THREADTEST3_SRC) $(TOP)\src\test_multiplex.c $(SQLITE3C) $(SQLITE3H)
 	$(LTLINK) $(NO_WARN) $(TOP)\test\threadtest3.c $(TOP)\src\test_multiplex.c $(SQLITE3C) /link $(LDFLAGS) $(LTLINKOPTS)
+
+# Convenienced targets for common executables that omit
+# the .exe suffix
+#
+sqldiff:	sqldiff.exe
+sqlite3_rsync: sqlite3_rsync.exe
+fuzzcheck: fuzzcheck.exe
+testfixture: testfixture.exe
+sqlite3: $(SQLITE3EXE)
+showdb: showdb.exe
+LogEst: LogEst.exe
+wordcount: wordcount.exe
+speedtest1: speedtest1.exe
+kvtest: kvtest.exe
+jimsh0: jimsh0.exe
 
 # Display key variables that control which version of TCL is to be used.
 #
@@ -2930,6 +2973,7 @@ clean:
 	del /Q LogEst.exe fts3view.exe rollback-test.exe showdb.exe dbdump.exe 2>NUL
 	del /Q changeset.exe 2>NUL
 	del /Q showjournal.exe showstat4.exe showwal.exe speedtest1.exe 2>NUL
+	del /Q fp-speed-1.exe fp-speed-2.exe 2>NUL
 	del /Q mptester.exe wordcount.exe rbu.exe srcck1.exe 2>NUL
 	del /Q sqlite3.c sqlite3-*.c sqlite3.h 2>NUL
 	del /Q sqlite3rc.h 2>NUL
@@ -2942,6 +2986,8 @@ clean:
 	del /Q kvtest.exe ossshell.exe scrub.exe 2>NUL
 	del /Q showshm.exe sqlite3_checker.* sqlite3_expert.exe 2>NUL
 	del /Q fts5.* fts5parse.* 2>NUL
+	del /Q vec1.* 2>NUL
 	del /q src-verify.exe 2>NUL
 	del /q jimsh.exe jimsh0.exe 2>NUL
+	-$(TCLSH_CMD) test/testrunner.tcl clean
 # <</mark>>

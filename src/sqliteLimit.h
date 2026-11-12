@@ -26,6 +26,27 @@
 #define SQLITE_MIN_LENGTH 30   /* Minimum value for the length limit */
 
 /*
+** Maximum size of any single memory allocation.
+**
+** This is not a limit on the total amount of memory used.  This is
+** a limit on the size parameter to sqlite3_malloc() and sqlite3_realloc().
+**
+** The upper bound is slightly less than 2GiB:  0x7ffffeff == 2,147,483,391
+** This provides a 256-byte safety margin for defense against 32-bit 
+** signed integer overflow bugs when computing memory allocation sizes.
+** Paranoid applications might want to reduce the maximum allocation size
+** further for an even larger safety margin.  0x3fffffff or 0x0fffffff
+** or even smaller would be reasonable upper bounds on the size of a memory
+** allocations for most applications.
+*/
+#ifndef SQLITE_MAX_ALLOCATION_SIZE
+# define SQLITE_MAX_ALLOCATION_SIZE  2147483391
+#endif
+#if SQLITE_MAX_ALLOCATION_SIZE>2147483391
+# error Maximum size for SQLITE_MAX_ALLOCATION_SIZE is 2147483391
+#endif
+
+/*
 ** This is the maximum number of
 **
 **    * Columns in a table
@@ -211,6 +232,10 @@
 # undef SQLITE_MAX_DEFAULT_PAGE_SIZE
 # define SQLITE_MAX_DEFAULT_PAGE_SIZE SQLITE_MAX_PAGE_SIZE
 #endif
+#if SQLITE_MAX_DEFAULT_PAGE_SIZE<SQLITE_DEFAULT_PAGE_SIZE
+# undef SQLITE_MAX_DEFAULT_PAGE_SIZE
+# define SQLITE_MAX_DEFAULT_PAGE_SIZE SQLITE_DEFAULT_PAGE_SIZE
+#endif
 
 
 /*
@@ -241,4 +266,60 @@
 */
 #ifndef SQLITE_MAX_TRIGGER_DEPTH
 # define SQLITE_MAX_TRIGGER_DEPTH 1000
+#endif
+
+/*
+** Maximum number of objects defined by a single database schema.
+** Objects include:
+**
+**   *  tables (including the sqlite_schema table)
+**   *  virtual tables
+**   *  named indexes
+**   *  indexes created automatically by UNIQUE and PRIMARY KEY constraints
+**   *  triggers
+**   *  views
+**
+** The total of all of the above is the number of objects in the schema,
+** and that number may not exceed this value.
+**
+** The maximum number of objects is restricted to forestall theoretical
+** signed integer overflow attacks using databases with billions of
+** schema objects.  Such attacks are "theoretical" because memory and
+** disk space constraints would be reached long before billions of schema
+** objects could be created.  Even so, it seems good to have a well defined
+** upper limit on the complexity of the schema, for defense in depth.
+** No real-world application should ever get anywhere close to hitting
+** this limit.
+*/
+#ifndef SQLITE_MAX_SCHEMA
+# define SQLITE_MAX_SCHEMA 10000000
+#endif
+
+/*
+** Maximum number of SQL statements allowed in the body of a single
+** trigger.
+*/
+#ifndef SQLITE_MAX_TRIGGER_STEPS
+# define SQLITE_MAX_TRIGGER_STEPS 65000
+#endif
+
+/*
+** Maximum number of CTE cursors (approximately).  This limit will be
+** exceeded if any CTE uses a cursor number larger than this value, even
+** of some of the cursors are used for something other than CTEs.
+**
+** The purpose of this limit is to prevent resource exhaustion caused
+** by hostile SQL inputs such as:
+**
+**    WITH c0 AS (SELECT 1 AS x),
+**         c1 AS (SELECT a.x AS x FROM c0 a, c0 b),
+**         c2 AS (SELECT a.x AS x FROM c1 a, c1 b),
+**         ...
+**         c17 AS (SELECT a.x AS x FROM c16 a, c16 b)
+**    SELECT count(*) FROM c17;
+**
+** See Bug 2026-10-04T05:35:14Z
+*/
+#ifndef SQLITE_MAX_CTES
+# define SQLITE_MAX_CTES 50000
 #endif

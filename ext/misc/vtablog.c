@@ -240,7 +240,7 @@ static int vtablogConnectCreate(
   printf("  schema = '%s'\n", zSchema);
   rc = sqlite3_declare_vtab(db, zSchema);
   if( rc==SQLITE_OK ){
-    pNew = sqlite3_malloc( sizeof(*pNew) );
+    pNew = sqlite3_malloc64( sizeof(*pNew) );
     *ppVtab = (sqlite3_vtab*)pNew;
     if( pNew==0 ) return SQLITE_NOMEM;
     memset(pNew, 0, sizeof(*pNew));
@@ -313,7 +313,7 @@ static int vtablogOpen(sqlite3_vtab *p, sqlite3_vtab_cursor **ppCursor){
   vtablog_cursor *pCur;
   printf("%s.%s.xOpen(cursor=%d)\n", pTab->zDb, pTab->zName,
          ++pTab->nCursor);
-  pCur = sqlite3_malloc( sizeof(*pCur) );
+  pCur = sqlite3_malloc64( sizeof(*pCur) );
   if( pCur==0 ) return SQLITE_NOMEM;
   memset(pCur, 0, sizeof(*pCur));
   pCur->iCursor = pTab->nCursor;
@@ -361,7 +361,8 @@ static int vtablogColumn(
 
   if( i<26 ){
     sqlite3_snprintf(sizeof(zVal),zVal,"%c%d", 
-                     "abcdefghijklmnopqrstuvwyz"[i], pCur->iRowid);
+                     "abcdefghijklmnopqrstuvwxyz"[i], pCur->iRowid);
+                   /* 0123456789 123456789 12345 */
   }else{
     sqlite3_snprintf(sizeof(zVal),zVal,"{%d}%d", i, pCur->iRowid);
   }
@@ -421,6 +422,10 @@ static void vtablogQuote(sqlite3_value *p){
       int n = sqlite3_value_bytes(p);
       const unsigned char *z = (const unsigned char*)sqlite3_value_blob(p);
       int i;
+      if( z==0 ){
+        printf("/*OOM-fault*/");
+        break;
+      }
       printf("x'");
       for(i=0; i<n; i++) printf("%02x", z[i]);
       printf("'");
@@ -430,6 +435,7 @@ static void vtablogQuote(sqlite3_value *p){
       const char *z = (const char*)sqlite3_value_text(p);
       int i;
       char c;
+      if( z==0 ) z = "";
       for(i=0; (c = z[i])!=0 && c!='\''; i++){}
       if( c==0 ){
         printf("'%s'",z);

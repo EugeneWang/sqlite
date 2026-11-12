@@ -14,7 +14,7 @@
 # Test cases for the ".mode" command of the CLI.
 # To run these tests:
 #
-#   ./sqlite3 <test/modeA.clitest
+#   ./sqlite3 test/modeA.sql
 #
 #
 .open :memory:
@@ -79,7 +79,23 @@ SELECT * FROM t2;
 │            │ Quoted"    │         │         │
 ╰────────────┴────────────┴─────────┴─────────╯
 END
+.testcase 121
+.mode tty --wrap 1 --limits off
+SELECT 'xyz123' AS a, 2 AS b;
+.check <<END
+╭───┬───╮
+│ a │ b │
+╞═══╪═══╡
+│ x │ 2 │
+│ y │   │
+│ z │   │
+│ 1 │   │
+│ 2 │   │
+│ 3 │   │
+╰───┴───╯
+END
 .testcase 130
+.mode tty -wrap 10
 .mode
 .check <<END
 .mode qbox --limits on --quote relaxed --sw auto --textjsonb on
@@ -87,7 +103,7 @@ END
 .testcase 140
 .mode -v
 .check <<END
-.mode qbox --align "" --border on --blob-quote auto --colsep "" --escape auto --limits on --null "NULL" --quote relaxed --rowsep "" --sw auto --tablename "" --textjsonb on --titles on --widths "" --wordwrap off --wrap 10
+.mode qbox --align "" --border on --blob-quote auto --colsep "" --escape auto --fpfmt auto --ifmt auto --limits on --multiinsert 3000 --null "NULL" --quote relaxed --rowcount off --rowsep "" --sw auto --tablename "" --textjsonb on --titles always --widths "" --wordwrap off --wrap 10
 END
 .testcase 150 --error-prefix "Error:"
 .mode foo
@@ -99,28 +115,29 @@ END
 
 .testcase 160
 .mode --null xyzzy -v
-.output -glob ' --null "xyzzy"'
+.check -any ' --null "xyzzy"'
 .testcase 170
 .mode -null abcde -v
-.output -glob ' --null "abcde"'
+.check -any ' --null "abcde"'
 
 # Test cases for the ".explain off" command
 .mode box -reset
 .testcase 180
 EXPLAIN SELECT * FROM t1;
-.output --notglob *────* --keep
-.output --notglob "* id │ parent │ notused │ detail *" --keep
-.output --glob "*   Init  *"
+.check --nowhere ──── --keep
+.check --nowhere " id │ parent │ notused │ detail " --keep
+.check --regexp '\bInit\b' --keep
+.check --any ' Init '
 .testcase 190
 EXPLAIN QUERY PLAN SELECT * FROM t1;
-.output --glob "*`--SCAN *"
+.check --glob "*`--SCAN *"
 .explain off
 .testcase 200
 EXPLAIN SELECT * FROM t1;
-.output --glob *────*
+.check --regexp ────
 .testcase 210
 EXPLAIN QUERY PLAN SELECT * FROM t1;
-.output --glob "* id │ parent │ notused │ detail *"
+.check --glob "* id │ parent │ notused │ detail *"
 .explain auto
 
 # Test cases for limit settings in the .mode command.
@@ -146,7 +163,7 @@ END
 .mode --limits 0,0,0
 .mode -v
 .check <<END
-.mode box --align "" --border on --blob-quote auto --colsep "" --escape auto --limits off --null "" --quote off --rowsep "" --sw 0 --tablename "" --textjsonb off --titles on --widths "" --wordwrap off
+.mode box --align "" --border on --blob-quote auto --colsep "" --escape auto --fpfmt auto --ifmt auto --limits off --multiinsert 0 --null "" --quote off --rowcount off --rowsep "" --sw 0 --tablename "" --textjsonb off --titles always --widths "" --wordwrap off
 END
 
 .testcase 400
@@ -200,6 +217,14 @@ SELECT a AS 'abcdefghijklmnopqrstuvwxyz', b FROM t2 WHERE c=3;
 abcdefghijklmnopq...: The quick fox jumps over the lazy brown dog
                    b: 2
 END
+.testcase 501
+SELECT a AS 'a		bc', b AS 'b
+c
+d' FROM t2 WHERE c=3;
+.check <<END
+a  bc: The quick fox jumps over the lazy brown dog
+b c d: 2
+END
 .testcase 510
 .mode line --titlelimit 10
 SELECT a AS 'abcdefghijklmnopqrstuvwxyz', b FROM t2 WHERE c=3;
@@ -227,4 +252,926 @@ SELECT a AS 'abcd', b FROM t2 WHERE c=3;
 .check <<END
 ...: The quick fox jumps over the lazy brown dog
   b: 2
+END
+
+# --titlelimit counts display width, not bytes
+#
+# ten two-byte characters fit within --titlelimit 10
+.testcase 541
+.mode box --titlelimit 10
+SELECT 1 AS 'abcdefghij', 2 AS 'éééééééééé';
+.check <<END
+╭────────────┬────────────╮
+│ abcdefghij │ éééééééééé │
+╞════════════╪════════════╡
+│          1 │          2 │
+╰────────────┴────────────╯
+END
+# nine characters fit
+.testcase 542
+.mode box --titlelimit 10
+SELECT 1 AS 'abcdefghi', 2 AS 'ééééééééé';
+.check <<END
+╭───────────┬───────────╮
+│ abcdefghi │ ééééééééé │
+╞═══════════╪═══════════╡
+│         1 │         2 │
+╰───────────┴───────────╯
+END
+# eleven characters are truncated to seven plus an ellipsis
+.testcase 543
+.mode box --titlelimit 10
+SELECT 1 AS 'abcdefghijk', 2 AS 'ééééééééééé';
+.check <<END
+╭────────────┬────────────╮
+│ abcdefg... │ ééééééé... │
+╞════════════╪════════════╡
+│          1 │          2 │
+╰────────────┴────────────╯
+END
+# multi-byte characters at the end of the title
+.testcase 544
+.mode box --titlelimit 10
+SELECT 1 AS 'éééééééééz', 2 AS 'zééééééééé';
+.check <<END
+╭────────────┬────────────╮
+│ éééééééééz │ zééééééééé │
+╞════════════╪════════════╡
+│          1 │          2 │
+╰────────────┴────────────╯
+END
+# three-byte characters
+.testcase 545
+.mode box --titlelimit 10
+SELECT 1 AS '€€€€€€€€€', 2 AS '€€€€€€€€€€';
+.check <<END
+╭───────────┬────────────╮
+│ €€€€€€€€€ │ €€€€€€€€€€ │
+╞═══════════╪════════════╡
+│         1 │          2 │
+╰───────────┴────────────╯
+END
+# double-width characters; truncation must account for their width
+.testcase 546
+.mode box --titlelimit 10
+SELECT 1 AS '安安安安安安', 2 AS 'a安安安安安安';
+.check <<END
+╭───────────┬────────────╮
+│ 安安安... │ a安安安... │
+╞═══════════╪════════════╡
+│         1 │          2 │
+╰───────────┴────────────╯
+END
+.mode line --titlelimit 3
+
+# The --null option and the .nullvalue command must be honored by
+# ".mode html".  Bug 2026-11-05T22:27:46Z.
+#
+.testcase 550
+.mode html
+SELECT NULL AS n;
+.check <<END
+<tr>
+<th>n
+</tr>
+<tr>
+<td>null
+</tr>
+END
+
+.testcase 551
+.mode html --null XX
+SELECT NULL AS n;
+.check <<END
+<tr>
+<th>n
+</tr>
+<tr>
+<td>XX
+</tr>
+END
+
+.testcase 552
+.nullvalue YY
+SELECT NULL AS n;
+.check <<END
+<tr>
+<th>n
+</tr>
+<tr>
+<td>YY
+</tr>
+END
+
+.testcase 553
+.nullvalue
+SELECT NULL AS n;
+.check -glob "*sage: .nullvalue STRING*"
+
+# NULL text is HTML-escaped, and does not change how a string that
+# happens to look like the NULL text is rendered.
+.testcase 554
+.mode html --null <nil>
+SELECT NULL AS n, 'null' AS m;
+.check <<END
+<tr>
+<th>n
+<th>m
+</tr>
+<tr>
+<td>&lt;nil&gt;
+<td>null
+</tr>
+END
+
+# Switching to another mode and back restores the default for html.
+.testcase 555
+.mode list --null XX
+.mode html
+SELECT NULL AS n;
+.check <<END
+<tr>
+<th>n
+</tr>
+<tr>
+<td>null
+</tr>
+END
+.mode line --titlelimit 3
+.nullvalue ""
+
+# With "--escape off" a control character in a value is shown by the
+# columnar modes as a one-column Control Picture symbol.  Column widths
+# must count it as one column, so that the value is not wrapped.
+# Bug 2026-11-05T22:27:00Z.
+#
+.testcase 560
+.mode box --escape off
+SELECT 'a'||char(7)||'b' AS x;
+.check <<END
+╭─────╮
+│  x  │
+╞═════╡
+│ a␇b │
+╰─────╯
+END
+
+.testcase 561
+.mode box --escape symbol
+SELECT 'a'||char(7)||'b' AS x;
+.check <<END
+╭─────╮
+│  x  │
+╞═════╡
+│ a␇b │
+╰─────╯
+END
+
+.testcase 562
+.mode box --escape ascii
+SELECT 'a'||char(7)||'b' AS x;
+.check <<END
+╭──────╮
+│  x   │
+╞══════╡
+│ a^Gb │
+╰──────╯
+END
+
+.testcase 563
+.mode table --escape off
+SELECT 'a'||char(7)||'b' AS x, char(1)||'q'||char(2)||char(31) AS y;
+.check <<END
++-----+------+
+|  x  |  y   |
++-----+------+
+| a␇b | ␁q␂␟ |
++-----+------+
+END
+
+.testcase 564
+.mode column --escape off
+SELECT 'a'||char(7)||'b' AS x, 'xyz'||char(8) AS y;
+.check <<END
+ x    y
+---  ----
+a␇b  xyz␈
+END
+
+# A title wider than the value never wrapped, and still does not.
+.testcase 565
+.mode box --escape off --titlelimit 20
+SELECT 'a'||char(7)||'b' AS 'a long title';
+.check <<END
+╭──────────────╮
+│ a long title │
+╞══════════════╡
+│ a␇b          │
+╰──────────────╯
+END
+
+# Control characters combined with a width limit.
+.testcase 566
+.mode box --escape off --wrap 4
+SELECT 'ab'||char(7)||'cd'||char(8)||'ef' AS x;
+.check <<END
+╭──────╮
+│  x   │
+╞══════╡
+│ ab␇  │
+│ cd␈  │
+│ ef   │
+╰──────╯
+END
+.mode line --titlelimit 3 --wrap 0 --escape auto
+
+# The nLineLimit and nTitleLimit fields of sqlite3_qrf_spec are 16-bit.
+# A large value for --linelimit or --titlelimit must not wrap around into
+# a small one.  Bug 2026-11-05T22:26:14Z.
+#
+.testcase 570
+.mode box --titlelimit 20
+SELECT 1 AS abcdefghij;
+.check <<END
+╭────────────╮
+│ abcdefghij │
+╞════════════╡
+│          1 │
+╰────────────╯
+END
+
+.testcase 571
+.mode box --titlelimit 65540
+SELECT 1 AS abcdefghij;
+.check <<END
+╭────────────╮
+│ abcdefghij │
+╞════════════╡
+│          1 │
+╰────────────╯
+END
+
+.testcase 572
+.mode box --linelimit 20
+SELECT 'abc'||char(10)||'def'||char(10)||'ghi' AS x;
+.check <<END
+╭─────╮
+│  x  │
+╞═════╡
+│ abc │
+│ def │
+│ ghi │
+╰─────╯
+END
+
+.testcase 573
+.mode box --linelimit 65537
+SELECT 'abc'||char(10)||'def'||char(10)||'ghi' AS x;
+.check <<END
+╭─────╮
+│  x  │
+╞═════╡
+│ abc │
+│ def │
+│ ghi │
+╰─────╯
+END
+
+# Values that do not fit in 32 bits, and values that wrap to a negative
+# 16-bit number.
+.testcase 574
+.mode box --titlelimit 4294967297 --linelimit 4294967297
+SELECT 1 AS abcdefghij, 'abc'||char(10)||'def'||char(10)||'ghi' AS x;
+.check <<END
+╭────────────┬─────╮
+│ abcdefghij │  x  │
+╞════════════╪═════╡
+│          1 │ abc │
+│            │ def │
+│            │ ghi │
+╰────────────┴─────╯
+END
+
+.testcase 575
+.mode box --titlelimit 32769 --linelimit 32769
+SELECT 1 AS abcdefghij, 'abc'||char(10)||'def'||char(10)||'ghi' AS x;
+.check <<END
+╭────────────┬─────╮
+│ abcdefghij │  x  │
+╞════════════╪═════╡
+│          1 │ abc │
+│            │ def │
+│            │ ghi │
+╰────────────┴─────╯
+END
+
+# The --limits option has the same problem.
+.testcase 576
+.mode box --limits 65537,0,65540
+SELECT 1 AS abcdefghij, 'abc'||char(10)||'def'||char(10)||'ghi' AS x;
+.check <<END
+╭────────────┬─────╮
+│ abcdefghij │  x  │
+╞════════════╪═════╡
+│          1 │ abc │
+│            │ def │
+│            │ ghi │
+╰────────────┴─────╯
+END
+
+# Small values are unaffected.
+.testcase 577
+.mode box --titlelimit 4 --linelimit 1
+SELECT 1 AS abcdefghij, 'abc'||char(10)||'def'||char(10)||'ghi' AS x;
+.check <<END
+╭──────┬─────╮
+│ a... │  x  │
+╞══════╪═════╡
+│    1 │ abc │
+│      │ ... │
+╰──────┴─────╯
+END
+.mode line --titlelimit 3 --linelimit 5
+
+# line --screenwidth and --colsep
+#
+.testcase 550
+.mode line --sw 40 --colsep ":-hi-:"
+SELECT a AS 'abc', b FROM t2 WHERE c=3;
+.check <<END
+abc:-hi-:The quick fox jumps over the
+         lazy brown dog
+  b:-hi-:2
+END
+.testcase 551
+.mode line --sw 40 --colsep ":-hi-:" --wordwrap off
+SELECT a AS 'abc', b FROM t2 WHERE c=3;
+.check <<END
+abc:-hi-:The quick fox jumps over the la
+         zy brown dog
+  b:-hi-:2
+END
+# 23456789 123456789 123456789 123456789
+
+# line mode when a column name is wider than the screen width.  The value
+# must still be shown, two characters per line, rather than looping.
+# https://sqlite.org/bugs/info/f8dda85c2edf5565
+#
+.testcase 560
+.mode line --sw 10 --titlelimit 0
+SELECT 'abc' AS averyveryverylongcolumnname;
+.check <<END
+averyveryverylongcolumnname: ab
+                             c
+END
+.testcase 561
+.mode line --sw 10 --linelimit 4 --titlelimit 0
+SELECT 'abc' AS averyveryverylongcolumnname;
+.check <<END
+averyveryverylongcolumnname: ab
+                             c
+END
+# A double-width character with a screen width too narrow to hold it.
+.testcase 562
+.mode line --sw 4
+SELECT unistr('中文') AS a;
+.check <<END
+a: 中
+   文
+END
+
+# https://sqlite.org/forum/forumpost/2025-12-31T19:14:24z
+#
+# For legacy compatibility, ".header" settings are not changed
+# by ".mode" unless the --title or --reset option is used on .mode.
+#
+.testcase 600
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1(a,b,c);
+INSERT INTO t1 VALUES(1,2,3);
+.header on
+.mode csv
+SELECT * FROM t1;
+.check --glob *a,b,c*
+
+.testcase 601
+SELECT 'abc',char(0x05,0x18,0x33),'xyz';
+.check --glob *abc,"??3",xyz*
+
+.testcase 610
+.mode csv -reset
+SELECT * FROM t1;
+.check 1,2,3
+
+.testcase 620
+.mode tty
+.mode csv
+.header on
+SELECT * FROM t1;
+.check --glob a,b,c*
+
+.testcase 630
+.mode tty
+.mode csv --title on
+SELECT * FROM t1;
+.check --glob a,b,c*
+.testcase 631
+.mode tty
+.mode csv --title off
+SELECT * FROM t1;
+.check 1,2,3
+
+.testcase 640
+.mode csv --reset --colsep "^" --rowsep "::"
+SELECT 1, 2, 3 UNION ALL SELECT 'a','b','c';
+.check 1^2^3::a^b^c::
+
+# Verification of claims about .insert mode in the climode.html
+# documentation.
+.testcase 700
+CREATE TABLE tbl1(one,two);
+INSERT INTO tbl1 VALUES('hello!',10),('goodbye',20);
+.mode insert new_table --multiinsert 0
+SELECT * FROM tbl1;
+.check <<END
+INSERT INTO new_table VALUES('hello!',10);
+INSERT INTO new_table VALUES('goodbye',20);
+END
+.testcase 710
+.mode insert new_table --titles on
+SELECT * FROM tbl1;
+.check <<END
+INSERT INTO new_table(one,two) VALUES('hello!',10);
+INSERT INTO new_table(one,two) VALUES('goodbye',20);
+END
+.testcase 720
+.mode insert new_table --titles off
+SELECT * FROM tbl1;
+.check <<END
+INSERT INTO new_table VALUES('hello!',10);
+INSERT INTO new_table VALUES('goodbye',20);
+END
+.testcase 730
+.mode insert new_table --titles always --rowcount on
+SELECT * FROM tbl1;
+.check <<END
+INSERT INTO new_table(one,two) VALUES('hello!',10);
+INSERT INTO new_table(one,two) VALUES('goodbye',20);
+/* 2 rows inserted */
+END
+.testcase 740
+.mode insert new_table --titles always --rowcount on
+SELECT * FROM tbl1 WHERE two<0;
+.check <<END
+/* 0 rows inserted */
+END
+.testcase 750
+.mode insert new_table --titles always --rowcount on
+SELECT * FROM tbl1 WHERE two<15;
+.check <<END
+INSERT INTO new_table(one,two) VALUES('hello!',10);
+/* 1 row inserted */
+END
+
+# QRF reports an error if the string is too big.
+#
+.testcase 800
+.mode box
+.limit length 1000
+WITH c(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM c WHERE n<100)
+SELECT hex(randomblob(100)) c;
+.check -glob "*: string or blob too big"
+.limit length 10000000
+
+# "psql" mode.
+#
+.testcase 900
+.mode --reset psql -v
+.check <<END
+.mode psql --align "" --border off --blob-quote auto --colsep "" --escape auto --fpfmt auto --ifmt auto --limits off --multiinsert 0 --null "" --quote off --rowcount on --rowsep "" --sw 0 --tablename "" --textjsonb off --titles always --widths "" --wordwrap off
+END
+.testcase 901
+.mode
+.check <<END
+.mode psql
+END
+.testcase 902
+.mode --rowcount off
+.mode
+.check <<END
+.mode psql --rowcount off
+END
+.testcase 910
+.mode psql --reset
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1(ab INT, text_column TEXT, int_col INT);
+SELECT * FROM t1;
+.check <<END
+ ab | text_column | int_col
+----+-------------+---------
+(0 rows)
+END
+.testcase 911
+INSERT INTO t1 VALUES(31415926,'Hello',99);
+SELECT * FROM t1;
+.check <<END
+    ab    | text_column | int_col
+----------+-------------+---------
+ 31415926 | Hello       |      99
+(1 row)
+END
+.testcase 912
+INSERT INTO t1 VALUES(2,NULL,2);
+SELECT * FROM t1;
+.check <<END
+    ab    | text_column | int_col
+----------+-------------+---------
+ 31415926 | Hello       |      99
+        2 |             |       2
+(2 rows)
+END
+
+# Variations on ".mode -title"
+#
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1("a b", "c'""<""'d", "xyz", "123");
+.testcase 1000
+.mode box -reset -title off -title plain
+SELECT * FROM t1;
+.check <<END
+╭─────┬─────────┬─────┬─────╮
+│ a b │ c'"<"'d │ xyz │ 123 │
+╘═════╧═════════╧═════╧═════╛
+END
+.testcase 1001
+.mode -title off -title sql
+SELECT * FROM t1;
+.check <<END
+╭───────┬─────────────┬───────┬───────╮
+│ 'a b' │ 'c''"<"''d' │ 'xyz' │ '123' │
+╘═══════╧═════════════╧═══════╧═══════╛
+END
+.testcase 1002
+.mode -title off -title csv
+SELECT * FROM t1;
+.check <<END
+╭───────┬─────────────┬─────┬─────╮
+│ "a b" │ "c'""<""'d" │ xyz │ 123 │
+╘═══════╧═════════════╧═════╧═════╛
+END
+.testcase 1003
+.mode -title off -title html
+SELECT * FROM t1;
+.check <<END
+╭─────┬──────────────────────────────┬─────┬─────╮
+│ a b │ c&#39;&quot;&lt;&quot;&#39;d │ xyz │ 123 │
+╘═════╧══════════════════════════════╧═════╧═════╛
+END
+.testcase 1003b
+.mode -title off -title html -title off --title always
+SELECT * FROM t1;
+.check <<END
+╭─────┬──────────────────────────────┬─────┬─────╮
+│ a b │ c&#39;&quot;&lt;&quot;&#39;d │ xyz │ 123 │
+╘═════╧══════════════════════════════╧═════╧═════╛
+END
+.testcase 1003c
+.show
+.check --glob "*headers: always*"
+.testcase 1004
+.mode -title off -title tcl
+SELECT * FROM t1;
+.check <<END
+╭───────┬─────────────┬───────┬───────╮
+│ "a b" │ "c'\"<\"'d" │ "xyz" │ "123" │
+╘═══════╧═════════════╧═══════╧═══════╛
+END
+.testcase 1005
+.mode -title off -title json
+SELECT * FROM t1;
+.check <<END
+╭───────┬─────────────┬───────┬───────╮
+│ "a b" │ "c'\"<\"'d" │ "xyz" │ "123" │
+╘═══════╧═════════════╧═══════╧═══════╛
+END
+.testcase 1006
+.mode -title on -title json
+SELECT * FROM t1;
+.check ""
+.testcase 1007
+.mode -title on -title json -title auto
+SELECT * FROM t1;
+.check <<END
+╭─────┬─────────┬─────┬─────╮
+│ a b │ c'"<"'d │ xyz │ 123 │
+╘═════╧═════════╧═════╧═════╛
+END
+.testcase 1008
+.mode -title off -title json
+.headers always
+SELECT * FROM t1;
+.check <<END
+╭─────┬─────────┬─────┬─────╮
+│ a b │ c'"<"'d │ xyz │ 123 │
+╘═════╧═════════╧═════╧═════╛
+END
+.testcase 1100
+.mode -reset -fpfmt %.2f -ifmt %,d
+WITH RECURSIVE c(n) AS (VALUES(0.01) UNION ALL SELECT n*10 FROM c WHERE n<1e8)
+SELECT pi()*n, CAST(pi()*n AS INT) FROM c;
+.check <<END
+╭──────────────┬─────────────────────╮
+│    pi()*n    │ CAST(pi()*n AS INT) │
+╞══════════════╪═════════════════════╡
+│         0.03 │                   0 │
+│         0.31 │                   0 │
+│         3.14 │                   3 │
+│        31.42 │                  31 │
+│       314.16 │                 314 │
+│      3141.59 │               3,141 │
+│     31415.93 │              31,415 │
+│    314159.27 │             314,159 │
+│   3141592.65 │           3,141,592 │
+│  31415926.54 │          31,415,926 │
+│ 314159265.36 │         314,159,265 │
+╰──────────────┴─────────────────────╯
+END
+.testcase 1101
+.mode -fpfmt %+,0.2f -ifmt %04x
+WITH RECURSIVE c(n) AS (VALUES(0.01) UNION ALL SELECT n*10 FROM c WHERE n<1e8)
+SELECT pi()*n, CAST(pi()*n AS INT) FROM c;
+.check <<END
+╭─────────────────┬─────────────────────╮
+│     pi()*n      │ CAST(pi()*n AS INT) │
+╞═════════════════╪═════════════════════╡
+│           +0.03 │                0000 │
+│           +0.31 │                0000 │
+│           +3.14 │                0003 │
+│          +31.42 │                001f │
+│         +314.16 │                013a │
+│       +3,141.59 │                0c45 │
+│      +31,415.93 │                7ab7 │
+│     +314,159.27 │               4cb2f │
+│   +3,141,592.65 │              2fefd8 │
+│  +31,415,926.54 │             1df5e76 │
+│ +314,159,265.36 │            12b9b0a1 │
+╰─────────────────┴─────────────────────╯
+END
+.testcase 1102
+.mode -fpfmt %.6e -ifmt %#+o
+WITH RECURSIVE c(n) AS (VALUES(0.01) UNION ALL SELECT n*10 FROM c WHERE n<1e8)
+SELECT pi()*n, CAST(pi()*n AS INT) FROM c;
+.check <<END
+╭──────────────┬─────────────────────╮
+│    pi()*n    │ CAST(pi()*n AS INT) │
+╞══════════════╪═════════════════════╡
+│ 3.141593e-02 │                   0 │
+│ 3.141593e-01 │                   0 │
+│ 3.141593e+00 │                  03 │
+│ 3.141593e+01 │                 037 │
+│ 3.141593e+02 │                0472 │
+│ 3.141593e+03 │               06105 │
+│ 3.141593e+04 │              075267 │
+│ 3.141593e+05 │            01145457 │
+│ 3.141593e+06 │           013767730 │
+│ 3.141593e+07 │          0167657166 │
+│ 3.141593e+08 │         02256330241 │
+╰──────────────┴─────────────────────╯
+END
+.testcase 1103
+.mode -fpfmt auto -ifmt auto
+WITH RECURSIVE c(n) AS (VALUES(1) UNION ALL SELECT n*10 FROM c WHERE n<1e4)
+SELECT pi()*n, CAST(pi()*n AS INT) FROM c;
+.check <<END
+╭────────────────────┬─────────────────────╮
+│       pi()*n       │ CAST(pi()*n AS INT) │
+╞════════════════════╪═════════════════════╡
+│ 3.1415926535897931 │                   3 │
+│ 31.415926535897931 │                  31 │
+│ 314.15926535897933 │                 314 │
+│ 3141.5926535897929 │                3141 │
+│ 31415.926535897932 │               31415 │
+╰────────────────────┴─────────────────────╯
+END
+.testcase 1104
+.mode -fpfmt %d
+.check <<END
+Error: .mode -fpfmt %d
+Error:              ^--- not a valid floating-point format
+END
+.testcase 1105
+.mode -fpfmt xyz
+.check <<END
+Error: .mode -fpfmt xyz
+Error:              ^--- not a valid floating-point format
+END
+.testcase 1106
+.mode -fpfmt %1234f
+.check <<END
+Error: .mode -fpfmt %1234f
+Error:              ^--- not a valid floating-point format
+END
+.testcase 1107
+.mode -fpfmt %.1234f
+.check <<END
+Error: .mode -fpfmt %.1234f
+Error:              ^--- not a valid floating-point format
+END
+.testcase 1108
+.mode -fpfmt %?.2f
+.check <<END
+Error: .mode -fpfmt %?.2f
+Error:              ^--- not a valid floating-point format
+END
+.testcase 1109
+.mode -ifmt %.2f
+.check <<END
+Error: .mode -ifmt %.2f
+Error:             ^--- not a valid integer format
+END
+.testcase 1110
+.mode list -ifmt %x
+SELECT 123;
+.check 7b
+.testcase 1111
+.mode list -ifmt %X
+SELECT 123;
+.check 7B
+.testcase 1112
+.mode list -fpfmt %g
+SELECT 1.23456789e+12;
+.check 1.23457e+12
+.testcase 1113
+.mode list -fpfmt %G
+SELECT 1.23456789e+12;
+.check 1.23457E+12
+.testcase 1114
+.mode list -fpfmt "" -ifmt ""
+SELECT 1.25e+12, 0x1234;
+.check 1250000000000.0|4660
+
+# Bug 2026-10-04T05:35:43Z
+#
+.testcase 1200
+.mode jobject --fpfmt auto
+SELECT 1 AS a, +9.0e+999 AS b, -9.0e+999 AS c, 0.0 AS d;
+.check {"a":1,"b":9.0e+999,"c":-9.0e+999,"d":0.0}
+.open :memory:
+.testcase 1210
+CREATE TABLE t1(a);
+INSERT INTO t1 VALUES(123),(9e999),('hello'),(-9e999),(x'313233');
+.dump
+.check <<END
+PRAGMA foreign_keys=OFF;
+BEGIN TRANSACTION;
+CREATE TABLE t1(a);
+INSERT INTO t1 VALUES(123);
+INSERT INTO t1 VALUES(9.0e+999);
+INSERT INTO t1 VALUES('hello');
+INSERT INTO t1 VALUES(-9.0e+999);
+INSERT INTO t1 VALUES(x'313233');
+COMMIT;
+END
+
+# Bug 2026-10-17T09:26:21Z
+#
+.testcase 1300
+.mode box --title html --limits on
+SELECT '' AS '';
+.check <<END
+╭──╮
+│  │
+╞══╡
+│  │
+╰──╯
+END
+
+# Bug 2026-10-18T20:39:22Z
+#
+# .dump should not be affected by the --fpfmt, --ifmt, and --textjsonb
+# settings of .mode
+#
+.open :memory:
+.testcase 1400
+CREATE TABLE t1(a,b,c);
+INSERT INTO t1 VALUES(1234.5678, 16, jsonb('{"a":1}'));
+INSERT INTO t1 VALUES(0.5, 1234567, x'0102');
+.mode list --fpfmt %.2f --ifmt %x --textjsonb on
+.dump
+.check <<END
+PRAGMA foreign_keys=OFF;
+BEGIN TRANSACTION;
+CREATE TABLE t1(a,b,c);
+INSERT INTO t1 VALUES(1234.5678,16,x'4c17611331');
+INSERT INTO t1 VALUES(0.5,1234567,x'0102');
+COMMIT;
+END
+.testcase 1410
+.mode list --ifmt %,d
+.dump
+.check <<END
+PRAGMA foreign_keys=OFF;
+BEGIN TRANSACTION;
+CREATE TABLE t1(a,b,c);
+INSERT INTO t1 VALUES(1234.5678,16,x'4c17611331');
+INSERT INTO t1 VALUES(0.5,1234567,x'0102');
+COMMIT;
+END
+.testcase 1420
+SELECT a, b FROM t1;
+.check <<END
+1234.57|16
+0.50|1,234,567
+END
+.testcase 1430
+.mode
+.check ".mode list --fpfmt %.2f --ifmt %,d --limits on --textjsonb on"
+
+# Bug 2026-10-18T20:37:23Z
+#
+# Preserve full double precision for .dump and .mode insert.
+#
+.open :memory:
+.testcase 1500
+CREATE TABLE t(x REAL);
+INSERT INTO t VALUES(1.7976931348623157e308),(0.1+0.2),(123456789.123456789);
+.dump
+.check <<END
+PRAGMA foreign_keys=OFF;
+BEGIN TRANSACTION;
+CREATE TABLE t(x REAL);
+INSERT INTO t VALUES(1.7976931348623157e+308);
+INSERT INTO t VALUES(0.30000000000000004);
+INSERT INTO t VALUES(123456789.12345679);
+COMMIT;
+END
+
+# Bug 2026-10-24T04:41:27Z
+#
+# Relaxed quoting must quote text values that look like real literals
+# with no digits before the "." and text values that look like
+# hexadecimal integer literals.
+#
+.open :memory:
+.mode tty
+.testcase 1600
+SELECT '.5' AS a, '0.5' AS b, 0.5 AS c, '-.5' AS d, '0x10' AS e, 0x10 AS f;
+.check <<END
+╭──────┬───────┬─────┬───────┬────────┬────╮
+│  a   │   b   │  c  │   d   │   e    │ f  │
+╞══════╪═══════╪═════╪═══════╪════════╪════╡
+│ '.5' │ '0.5' │ 0.5 │ '-.5' │ '0x10' │ 16 │
+╰──────┴───────┴─────┴───────┴────────┴────╯
+END
+.testcase 1610
+CREATE TABLE t2(a,b);
+INSERT INTO t2(a,b) VALUES
+  (1,'.5'),
+  (1,'-.5'),
+  (1,'+.5'),
+  (1,'.5e3'),
+  (1,'.5E-3'),
+  (1,'5.'),
+  (0,'.'),
+  (0,'-.'),
+  (0,'.e5'),
+  (0,'.5.5'),
+  (0,'.5x'),
+  (0,'.5e'),
+  (1,'0x1F'),
+  (1,'0X1f'),
+  (1,'-0x10'),
+  (1,'+0xabcdef'),
+  (0,'0x'),
+  (0,'0x1G'),
+  (0,'0x1.5'),
+  (0,'x10'),
+  (0,'1x10');
+SELECT if(a,'yes','') AS 'quoted?', b AS string FROM t2 ORDER BY rowid;
+.check <<END
+╭─────────┬─────────────╮
+│ quoted? │   string    │
+╞═════════╪═════════════╡
+│ yes     │ '.5'        │
+│ yes     │ '-.5'       │
+│ yes     │ '+.5'       │
+│ yes     │ '.5e3'      │
+│ yes     │ '.5E-3'     │
+│ yes     │ '5.'        │
+│         │ .           │
+│         │ -.          │
+│         │ .e5         │
+│         │ .5.5        │
+│         │ .5x         │
+│         │ .5e         │
+│ yes     │ '0x1F'      │
+│ yes     │ '0X1f'      │
+│ yes     │ '-0x10'     │
+│ yes     │ '+0xabcdef' │
+│         │ 0x          │
+│         │ 0x1G        │
+│         │ 0x1.5       │
+│         │ x10         │
+│         │ 1x10        │
+╰─────────┴─────────────╯
 END

@@ -33,14 +33,18 @@ verify its integrity, there are hints on how to do that in the
 
 ## Contacting The SQLite Developers
 
-The preferred way to ask questions or make comments about SQLite or to
-report bugs against SQLite is to visit the 
-[SQLite Forum](https://sqlite.org/forum) at <https://sqlite.org/forum/>.
-Anonymous postings are permitted.
+The preferred way to ask questions or make comments about SQLite is to
+visit the [SQLite Forum](https://sqlite.org/forum) at
+<https://sqlite.org/forum/>.  Anonymous postings are permitted.
+Do <u>not</u> send bug reports to the main SQLite Forum.
+To report bugs, post a message on the [SQLite bugs
+forum](https://sqlite.org/bugs) at <https://sqlite.org/bugs>.
 
-If you think you have found a bug that has security implications and
-you do not want to report it on the public forum, you can send a private
-email to drh at sqlite dot org.
+If you think you have found a bug that has security implications, report
+it to the SQLite bugs forum anyhow.  If you really don't want to do that,
+you can instead send a private email to drh at sqlite dot org.  However,
+unsolicited messages sent to that email address are liable to be
+copy/pasted onto the SQLite bugs forum anyhow.
 
 ## Public Domain
 
@@ -80,8 +84,8 @@ Then run commands like this:
         fossil open https://sqlite.org/src
 
 The initial "fossil open" command will take two or three minutes.  Afterwards,
-you can do fast, bandwidth-efficient updates to the whatever versions
-of SQLite you like.  Some examples:
+you can do fast, bandwidth-efficient updates to whatever versions of SQLite you
+like.  Some examples:
 
         fossil update trunk             ;# latest trunk check-in
         fossil update release           ;# latest official release
@@ -97,6 +101,8 @@ the build products.  It is recommended, but not required, that the
 build directory be separate from the source directory.  Cd into the
 build directory and then from the build directory run the configure
 script found at the root of the source tree.  Then run "make".
+See the [compile-for-unix.md](doc/compile-for-unix.md) document for
+more detail.
 
 For example:
 
@@ -110,9 +116,8 @@ For example:
         make sqldiff                  ;#  The "sqldiff" command-line tool
         #### Targets below require tcl-dev ####
         make tclextension-install     ;#  Install the SQLite TCL extension
-        make devtest                  ;#  Run development tests
+        make test                     ;#  Run development tests
         make releasetest              ;#  Run full release tests
-        make sqlite3_analyzer         ;#  Builds the "sqlite3_analyzer" tool
 
 See the makefile for additional targets.  For debugging builds, the
 core developers typically run "configure" with options like this:
@@ -174,9 +179,8 @@ file:
         make sqldiff.exe
         #### Targets below require TCL development libraries ####
         make tclextension-install
-        make devtest
+        make test
         make releasetest
-        make sqlite3_analyzer.exe
  
 There are many other makefile targets.  See comments in Makefile.msc for
 details.

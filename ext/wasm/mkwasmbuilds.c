@@ -40,14 +40,22 @@
 /*
 ** Flags for use with BuildDef::flags.
 **
-** Maintenance reminder: do not combine flags within this enum,
-** e.g. F_BUNDLER_FRIENDLY=0x02|F_ESM, as that will lead
-** to breakage in some of the flag checks.
+** Maintenance reminder: do not combine F_... flags within this enum,
+** e.g. F_BUNDLER_FRIENDLY=0x02|F_ESM, as that will lead to breakage
+** in some of the flag checks.
 */
 enum BuildDefFlags {
   /* Indicates an ESM module build. */
   F_ESM              = 0x01,
-  /* Indicates a "bundler-friendly" build mode. */
+  /* Indicates a "bundler-friendly" build mode. These are untested and
+  ** unsupported, provided solely for the downstream npm subproject
+  ** (who is responsible for any testing of these).
+  **
+  ** The only difference beween bundler-friendly and esm builds is
+  ** that bundlers require static filename strings in a few places due
+  ** to limitations of bundler tooling, whereas vanilla and ESM can
+  ** both work with dynamic strings.
+  */
   F_BUNDLER_FRIENDLY = 1<<1,
   /* Indicates that this build is unsupported. Such builds are not
   ** added to the 'all' target. The unsupported builds exist primarily
@@ -57,8 +65,11 @@ enum BuildDefFlags {
   F_NOT_IN_ALL       = 1<<3,
   /* If it's a 64-bit build. */
   F_64BIT            = 1<<4,
-  /* Indicates a node.js-for-node.js build (untested and
-  ** unsupported). */
+  /* Indicates a node.js-for-node.js build. This build is very
+  ** specificially untested and unsupported, but the downstream npm
+  ** project makes use of it. None of our JS code is specific to node,
+  ** but Emscripten's generated sqlite3.js differs between
+  ** for-the-browser and for-node builds. */
   F_NODEJS           = 1<<5,
   /* Indicates a wasmfs build (untested and unsupported). */
   F_WASMFS           = 1<<6,
@@ -77,7 +88,7 @@ enum BuildDefFlags {
   ** differ, however.
   */
   CP_JS              = 1 << 30, /* X.js or X.mjs, depending on F_ESM */
-  CP_WASM            = 1 << 31, /* X,wasm */
+  CP_WASM            = 1 << 31, /* X.wasm */
   CP_ALL             = CP_JS | CP_WASM
 };
 
@@ -94,7 +105,7 @@ enum BuildDefFlags {
 ** final build directory $(dir.dout).
 **
 ** To keep parallel builds from stepping on each other, each distinct
-** build goes into its own subdir $(dir.dout.$(BuildDef::zBaseName).
+** build goes into its own subdir $(dir.dout)/$(BuildDef::zBaseName).
 ** Builds which produce deliverables we'd like to keep/distribute copy
 ** their final results into the build dir $(dir.dout). See the notes
 ** for the CP_JS enum entry for more details on that.
@@ -125,7 +136,7 @@ enum BuildDefFlags {
 **
 ** Each of those inputs has to be generated before passing them on to
 ** Emscripten so that any build-specific capabilities can get filtered
-** in or out (using ./c-pp-lite.c).
+** in or out (using ./c-pp).
 */
 struct BuildDef {
   /*
@@ -140,7 +151,7 @@ struct BuildDef {
   **
   ** The convention for 32- vs 64-bit pairs is to give them similar
   ** emoji, e.g. a cookie for 32-bit and a donut or cake for 64.
-  ** Alternately, the same emoji a "64" suffix, except that that
+  ** Alternately, the same emoji with a "64" suffix, except that that
   ** throws off the output alignment in parallel builds ;).
   */
   const char *zEmo;
@@ -152,7 +163,7 @@ struct BuildDef {
   ** sqlite3.wasm file. In such cases we don't need the extra
   ** sqlite3-foo-bar.wasm which Emscripten (necessarily) creates when
   ** compiling the module, so we patch (at build-time) the JS file to
-  ** use this name instead sqlite3-foo-bar.
+  ** use this name instead of sqlite3-foo-bar.
   */
   const char *zDotWasm;
   const char *zCmppD;     /* Extra -D... flags for c-pp */
@@ -164,7 +175,7 @@ struct BuildDef {
   ** Makefile code "ifeq (...)". If set, this build is enclosed in a
   ** $zIfCond/endif block.
   */
-  const char *zIfCond;    /* makefile "ifeq (...)" or similar */
+  const char *zIfCond;
   int flags;              /* Flags from BuildDefFlags */
 };
 typedef struct BuildDef BuildDef;
@@ -180,7 +191,7 @@ typedef struct BuildDef BuildDef;
 **  logtag.NAME   = Used for decorating log output
 **
 ** etc.
-***/
+*/
 #define BuildDefs_map(E)  \
   E(vanilla) E(vanilla64) \
   E(esm)     E(esm64)     \
@@ -231,11 +242,11 @@ const BuildDefs oBuildDefs = {
     .zDotWasm    = 0,
     .zCmppD      = 0,
     .zEmcc       = 0,
-    .zEmccExtra  = "-sMEMORY64=1 -sWASM_BIGINT=1",
+    .zEmccExtra  = "$(emcc.MEMORY64)",
     .zEnv        = 0,
     .zDeps       = 0,
     .zIfCond     = 0,
-    .flags       = CP_ALL | F_64BIT
+    .flags       = CP_ALL | F_64BIT | F_NOT_IN_ALL
   },
 
   /* The canonical esm build. */
@@ -259,11 +270,11 @@ const BuildDefs oBuildDefs = {
     .zDotWasm    = 0,
     .zCmppD      = "-Dtarget:es6-module",
     .zEmcc       = 0,
-    .zEmccExtra  = "-sMEMORY64=1 -sWASM_BIGINT=1",
+    .zEmccExtra  = "$(emcc.MEMORY64)",
     .zEnv        = 0,
     .zDeps       = 0,
     .zIfCond     = 0,
-    .flags       = CP_JS | F_ESM | F_64BIT
+    .flags       = CP_JS | F_ESM | F_64BIT | F_NOT_IN_ALL
   },
 
  /* speedtest1, our primary benchmarking tool */
@@ -302,7 +313,7 @@ const BuildDefs oBuildDefs = {
     .zEmcc       =
     "$(emcc.speedtest1)"
     " $(emcc.speedtest1.common)"
-    " -sMEMORY64=1 -sWASM_BIGINT=1"
+    " $(emcc.MEMORY64)"
     " $(pre-post.speedtest164.flags)"
     " $(cflags.common)"
     " -DSQLITE_SPEEDTEST1_WASM"
@@ -341,7 +352,7 @@ const BuildDefs oBuildDefs = {
     .zEnv        = 0,
     .zDeps       = 0,
     .zIfCond     = 0,
-    .flags       = CP_JS | F_BUNDLER_FRIENDLY | F_ESM
+    .flags       = CP_JS | F_BUNDLER_FRIENDLY | F_ESM | F_NOT_IN_ALL
   },
 
   /* 64-bit bundler-friendly. */
@@ -351,7 +362,7 @@ const BuildDefs oBuildDefs = {
     .zDotWasm    = "sqlite3-64bit",
     .zCmppD      = "$(c-pp.D.bundler)",
     .zEmcc       = 0,
-    .zEmccExtra  = "-sMEMORY64=1",
+    .zEmccExtra  = "$(emcc.MEMORY64)",
     .zEnv        = 0,
     .zDeps       = 0,
     .zIfCond     = 0,
@@ -454,12 +465,12 @@ static void mk_prologue(void){
   pf(zBanner
      "define b.do.emcc\n"
      /* $1 = build name */
-     "$(bin.emcc) -o $@ $(emcc_opt_full) $(emcc.flags) "
-     "$(emcc.jsflags) -sENVIRONMENT=$(emcc.environment.$(1)) "
-     " $(pre-post.$(1).flags) "
-     " $(emcc.flags.$(1)) "
-     " $(cflags.common) $(cflags.$(1)) "
-     " $(SQLITE_OPT) "
+     "$(bin.emcc) -o $@ $(emcc_opt_full) $(emcc.flags)"
+     " $(emcc.jsflags) -sENVIRONMENT=$(emcc.environment.$(1))"
+     " $(pre-post.$(1).flags)"
+     " $(emcc.flags.$(1))"
+     " $(cflags.common) $(cflags.$(1))"
+     " $(SQLITE_OPT)"
      " $(cflags.wasm_extra_init) $(sqlite3-wasm.c.in)\n"
      "endef\n"
   );
@@ -482,11 +493,18 @@ static void mk_prologue(void){
       ** configuration). Comments like "saves nothing" may not be
       ** technically correct: "nothing" means "some neglible amount."
       **
-      ** Note that performance gains/losses are _not_ taken into
-      ** account here: only wasm file size.
+      ** Performance gains or losses are _not_ taken into account
+      ** here, only wasm file size.
       */
+#if 1
+      /* -Oz builds fail to build if we remove this block, for
+         as-yet-unknown reasons. */
       "--enable-bulk-memory-opt " /* required */
       "--all-features "           /* required */
+      "--disable-compact-imports " /*
+         https://github.com/emscripten-core/emscripten/issues/28016
+      */
+#endif
       "--post-emscripten "        /* Saves roughly 12kb */
       "--strip-debug "            /* We already wasm-strip, but in
                                   ** case this environment has no
@@ -592,8 +610,12 @@ static char const * BuildDef_basename(const BuildDef * pB){
 static void mk_pre_post(char const *zBuildName, BuildDef const * pB){
   char const * const zBaseName = pB
     ? BuildDef_basename(pB) : 0;
+    char const * const zDotWasm = pB
+      ? (pB->zDotWasm ? pB->zDotWasm : zBaseName)
+      : 0;
 
-  assert( zBuildName );
+  assert( zBuildName
+          && "This function has not supported a null pB in a long time" );
   pf("%s# Begin --pre/--post flags for %s\n", zBanner, zBuildName);
 
   ps("# --pre-js=...");
@@ -609,9 +631,6 @@ static void mk_pre_post(char const *zBuildName, BuildDef const * pB){
        "))",
        zBuildName, zBuildName, zBuildName);
   }else{
-    char const *zWasmFile = pB->zDotWasm
-      ? pB->zDotWasm
-      : pB->zBaseName;
     /*
     ** See BuildDef::zDotWasm for _why_ we do this. _What_ we're doing
     ** is generate $(pre-js.BUILDNAME.js) as above, but:
@@ -626,20 +645,22 @@ static void mk_pre_post(char const *zBuildName, BuildDef const * pB){
     */
     pf("$(pre-js.%s.js): $(pre-js.in.js) $(bin.c-pp) $(MAKEFILE_LIST)",
        zBuildName);
-    if( pB->zDotWasm ){
+    if( 0 && zDotWasm ){
       pf(" $(dir.dout)/%s.wasm" /* This .wasm is from some other
                                    build, so this may trigger a full
                                    build of the reference copy. */,
-         pB->zDotWasm);
+         zDotWasm);
     }
     ps("");
     pf("\t@$(call b.mkdir@); $(call b.c-pp.shcmd,"
        "%s,"
        "$(pre-js.in.js),"
        "$(pre-js.%s.js),"
-       "$(c-pp.D.%s)" C_PP_D_CUSTOM_INSTANTIATE
+       "$(c-pp.D.%s) -Dsqlite3.wasm.base64=$(dir.dout)/%s.wasm"
+       C_PP_D_CUSTOM_INSTANTIATE
        ")\n",
-       zBuildName, zBuildName, zBuildName);
+       zBuildName, zBuildName, zBuildName,
+       zDotWasm/*null is harmless here*/);
   }
 
   ps("\n# --post-js=...");
@@ -672,8 +693,7 @@ static void mk_pre_post(char const *zBuildName, BuildDef const * pB){
        "$(extern-post-js.%s.js),"
        "$(c-pp.D.%s) --@policy=error -Dsqlite3.wasm=%s.wasm"
        "))",
-       zBuildName, zBuildName, zBuildName,
-       zBaseName);
+       zBuildName, zBuildName, zBuildName, zDotWasm);
   }else{
     pf("$(eval $(call b.c-pp.target,"
        "%s,"
@@ -692,7 +712,6 @@ static void mk_pre_post(char const *zBuildName, BuildDef const * pB){
      "--post-js=$(post-js.%s.js) "
      "--extern-post-js=$(extern-post-js.%s.js)\n",
      zBuildName, zBuildName, zBuildName, zBuildName);
-
 
   /* Set up deps... */
   pf("pre-post.%s.deps = "
@@ -736,6 +755,12 @@ static void emit_api_js(char const *zBuildName){
      zBuildName, zBuildName, zBuildName);
   pf("$(out.%s.js): $(sqlite3-api.%s.js)\n",
      zBuildName, zBuildName);
+  pf("$(sqlite3-api.%s.js):"
+     /* Extra deps needed by the OPFS pieces... */
+     " $(dir.api)/opfs-common-shared.c-pp.js"
+     " $(dir.api)/opfs-common-inline.c-pp.js"
+     "\n",
+     zBuildName);
 }
 
 /*
@@ -744,14 +769,19 @@ static void emit_api_js(char const *zBuildName){
 static void mk_lib_mode(const char *zBuildName, const BuildDef * pB){
   const char * zJsExt = BuildDef_jsext(pB);
   char const * const zBaseName = BuildDef_basename(pB);
+  char const * const zDotWasm = pB
+    ? (pB->zDotWasm ? pB->zDotWasm : zBaseName)
+    : 0;
 
   assert( oBuildDefs.vanilla.zEnv );
   assert( zBaseName );
+  assert( zDotWasm );
 
   pf("%s# Begin build [%s%s]. flags=0x%02x\n", zBanner,
      pB->zEmo, zBuildName, pB->flags);
-  pf("# zCmppD=%s\n# zBaseName=%s\n",
-     pB->zCmppD ? pB->zCmppD : "", zBaseName);
+  pf("# zCmppD=%s\n# zBaseName=%s\n# zDotWasm=%s\n",
+     pB->zCmppD ? pB->zCmppD : "",
+     zBaseName, zDotWasm);
   pf("b.names += %s\n"
      "emo.b.%s = %s\n",
      zBuildName, zBuildName, pB->zEmo);
@@ -854,10 +884,26 @@ static void mk_lib_mode(const char *zBuildName, const BuildDef * pB){
          /* althttpd will automatically try to execute wasm files
             if they have the +x bit set. Why that bit is set
             at all is a mystery. */);
-      pf("\t@$(call b.call.wasm-strip,%s)\n", zBuildName);
-
       pf("\t@$(call b.do.wasm-opt,%s)\n", zBuildName);
+      pf("\t@$(call b.call.wasm-strip,%s)\n", zBuildName);
       pf("\t@$(call b.strip-js-emcc-bindings,$(logtag.%s))\n", zBuildName);
+
+      pf("\t@if [ x1 = 'x$(base64.wasm)' ]; then \\\n"
+         "\techo '$(logtag.%s) $(emo.magic) Embedding $(out.%s.wasm) into $@ ...'; \\\n"
+         "\telse \\\n"
+         "\techo '$(logtag.%s) $(emo.megaphone) Not embedding WASM in JS. Pass base64.wasm=1 to do that.'; \\\n"
+         "\tfi\n",
+         zBuildName, zBuildName, zBuildName);
+      pf("\t@mv $@ $@.in; \\\n"
+         "\t$(call b.c-pp.shcmd,%s,$@.in,$@,"
+         " \"--delimiter=//%%\" -Dbase64.wasm=$(base64.wasm)"
+         " \"-Dsqlite3.wasm.base64=$(out.%s.wasm)\""
+         "); \\\n"
+         "\tchmod u+w $@;\\\n"
+         /* ^^^ the build makes generated files read-only, which then breaks
+            rebuild. */
+         "\trm -f $@.in\n",
+         zBuildName, zBuildName);
 
       if( CP_JS & pB->flags ){
         /*
@@ -936,7 +982,7 @@ static void mk_lib_mode(const char *zBuildName, const BuildDef * pB){
        "endif\n",
        zBuildName, pB->zIfCond);
   }
-  pf("# End build [%s]%s", zBuildName, zBanner);
+  pf("# End build [%s%s]%s", pB->zEmo, zBuildName, zBanner);
 }
 
 
@@ -983,10 +1029,18 @@ static void mk_fiddle(void){
       pf("$(out.%s.js): $(MAKEFILE_LIST) "
          "$(EXPORTED_FUNCTIONS.fiddle) "
          "$(fiddle.c.in) "
-         "$(pre-post.%s.deps)\n",
+         "$(pre-post.%s.deps) "
+         "$(dir.dout)/sqlite3-opfs-async-proxy.js",
          zBuildName, zBuildName);
+      if( isDebug ){
+        pf(" $(dir.fiddle)/fiddle-worker.js"
+           " $(dir.fiddle)/fiddle.js"
+           " $(dir.fiddle)/index.html");
+      }
+      ps("");
       emit_compile_start(zBuildName);
-      pf("\t$(b.cmd@)$(bin.emcc) -o $@"
+      pf("\t@$(call b.mkdir@)\n"
+         "\t$(b.cmd@)$(bin.emcc) -o $@"
          " $(emcc.flags.%s)" /* set in GNUmakefile */
          " $(pre-post.%s.flags)"
          " $(fiddle.c.in)"
@@ -996,15 +1050,15 @@ static void mk_fiddle(void){
       pf("\t@$(call b.call.wasm-strip,%s)\n", zBuildName);
       pf("\t@$(call b.strip-js-emcc-bindings,$(logtag.%s))\n",
          zBuildName);
-      pf("\t@$(call b.cp,"
-         "%s,"
-         "$(dir.api)/sqlite3-opfs-async-proxy.js,"
-         "$(dir $@))\n", zBuildName);
+      pf("\t@$(call b.cp,%s,$(dir.dout)/sqlite3-opfs-async-proxy.js,"
+         "$(dir $@)"
+         ")\n", zBuildName);
       if( isDebug ){
         pf("\t@$(call b.cp,%s,"
            "$(dir.fiddle)/index.html "
            "$(dir.fiddle)/fiddle.js "
-           "$(dir.fiddle)/fiddle-worker.js,"
+           "$(dir.fiddle)/fiddle-worker.js "
+           "$(dir.fiddle)/sqlite3-opfs-async-proxy.js,"
            "$(dir $@)"
            ")\n",
            zBuildName);
@@ -1048,11 +1102,11 @@ int main(int argc, char const ** argv){
     */
     for( int i = 1; i < argc; ++i ){
       char const * const zArg = argv[i];
-#define E(N) if(0==strcmp(#N, zArg)) {mk_lib_mode(# N, &oBuildDefs.N);} else /**/
+#define E(N) if(0==strcmp(#N, zArg)) {mk_lib_mode(# N, &oBuildDefs.N);} else
       BuildDefs_map(E) if( 0==strcmp("prologue",zArg) ){
         mk_prologue();
-      }else {
-        fprintf(stderr,"Unkown build name: %s\n", zArg);
+      }else{
+        fprintf(stderr,"Unknown build name: %s\n", zArg);
         rc = 1;
         break;
       }

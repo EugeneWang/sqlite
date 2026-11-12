@@ -79,6 +79,7 @@ struct carray_bind {
   int nData;                  /* Number of elements */
   int mFlags;                 /* Control flags */
   void (*xDel)(void*);        /* Destructor for aData */
+  void *pDel;                 /* Alternative argument to xDel() */
 };
 
 
@@ -215,8 +216,14 @@ static int carrayColumn(
         default: {
           const struct iovec *p = (struct iovec*)pCur->pPtr;
           assert( pCur->eType==CARRAY_BLOB );
-          sqlite3_result_blob(ctx, p[pCur->iRowid-1].iov_base,
-                              (int)p[pCur->iRowid-1].iov_len, SQLITE_TRANSIENT);
+          p += pCur->iRowid-1;
+          if( p->iov_len>0x7fffffff ){
+            sqlite3_result_error_toobig(ctx);
+            return SQLITE_TOOBIG;
+          }else{
+            sqlite3_result_blob(ctx, p->iov_base, (int)p->iov_len,
+                                 SQLITE_TRANSIENT);
+          }
           return SQLITE_OK;
         }
       }
@@ -411,7 +418,7 @@ static sqlite3_module carrayModule = {
 static void carrayBindDel(void *pPtr){
   carray_bind *p = (carray_bind*)pPtr;
   if( p->xDel!=SQLITE_STATIC ){
-     p->xDel(p->aData);
+    p->xDel(p->pDel);
   }
   sqlite3_free(p);
 }
@@ -419,14 +426,26 @@ static void carrayBindDel(void *pPtr){
 /*
 ** Invoke this interface in order to bind to the single-argument
 ** version of CARRAY().
+**
+**    pStmt        The prepared statement to which to bind
+**    idx          The index of the parameter of pStmt to which to bind
+**    aData        The data to be bound
+**    nData        The number of elements in aData
+**    mFlags       One of SQLITE_CARRAY_xxxx indicating datatype of aData
+**    xDestroy     Destructor for pDestroy or aData if pDestroy==NULL.
+**    pDestroy     Invoke xDestroy on this pointer if not NULL
+**
+** The destructor is called pDestroy if pDestroy!=NULL, or against
+** aData if pDestroy==NULL.
 */
-SQLITE_API int sqlite3_carray_bind(
+SQLITE_API int sqlite3_carray_bind_v2(
   sqlite3_stmt *pStmt,
   int idx,
   void *aData,
   int nData,
   int mFlags,
-  void (*xDestroy)(void*)
+  void (*xDestroy)(void*),
+  void *pDestroy
 ){
   carray_bind *pNew = 0;
   int i;
@@ -468,7 +487,7 @@ SQLITE_API int sqlite3_carray_bind(
       }
     } 
 
-    pNew->aData = sqlite3_malloc64( sz );
+    pNew->aData = sqlite3_malloc64( sz>0 ? sz : 1 );
     if( pNew->aData==0 ){
       rc = SQLITE_NOMEM;
       goto carray_bind_error;
@@ -494,27 +513,48 @@ SQLITE_API int sqlite3_carray_bind(
       unsigned char *z = (unsigned char*)&p[nData];
       for(i=0; i<nData; i++){
         size_t n = ((struct iovec*)aData)[i].iov_len;
+        void *a = ((struct iovec*)aData)[i].iov_base;
         p[i].iov_len = n;
-        p[i].iov_base = z;
-        z += n;
-        memcpy(p[i].iov_base, ((struct iovec*)aData)[i].iov_base, n);
+        p[i].iov_base = a ? z : 0;
+        if( n ){
+          z += n;
+          memcpy(p[i].iov_base, a, n);
+        }
       }
-    }else{
+    }else if( sz>0 ){
       memcpy(pNew->aData, aData, sz);
     }
     pNew->xDel = sqlite3_free;
+    pNew->pDel = pNew->aData;
   }else{
     pNew->aData = aData;
     pNew->xDel = xDestroy;
+    pNew->pDel = pDestroy;
   }
   return sqlite3_bind_pointer(pStmt, idx, pNew, "carray-bind", carrayBindDel);
  
  carray_bind_error:
   if( xDestroy!=SQLITE_STATIC && xDestroy!=SQLITE_TRANSIENT ){
-    xDestroy(aData);
+    xDestroy(pDestroy);
   }
   sqlite3_free(pNew);
   return rc;
+}
+
+/*
+** Invoke this interface in order to bind to the single-argument
+** version of CARRAY().  Same as sqlite3_carray_bind_v2() with the
+** pDestroy parameter set to NULL.
+*/
+SQLITE_API int sqlite3_carray_bind(
+  sqlite3_stmt *pStmt,
+  int idx,
+  void *aData,
+  int nData,
+  int mFlags,
+  void (*xDestroy)(void*)
+){
+  return sqlite3_carray_bind_v2(pStmt,idx,aData,nData,mFlags,xDestroy,aData);
 }
 
 /*

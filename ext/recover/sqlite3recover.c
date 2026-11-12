@@ -15,7 +15,7 @@
 
 #include "sqlite3recover.h"
 #include <assert.h>
-#include <string.h>
+#include <windows.h>
 
 #ifndef SQLITE_OMIT_VIRTUALTABLE
 
@@ -62,6 +62,12 @@ typedef struct RecoverColumn RecoverColumn;
 **   aCol[] is an array of nCol columns. In the order in which they appear 
 **   in the table.
 **
+** nField:
+**   The number of fields in each record of the table's b-tree. This may
+**   be less than nCol (VIRTUAL generated columns have no field) or, for
+**   a WITHOUT ROWID table with a column that appears more than once in
+**   the PRIMARY KEY, greater than nCol.
+**
 ** bIntkey:
 **   Set to true for intkey tables, false for WITHOUT ROWID.
 **
@@ -75,6 +81,12 @@ typedef struct RecoverColumn RecoverColumn;
 **   KEY column, then the rowid value should be bound to the index associated
 **   with the column.
 **
+** zRowid:
+**   If iRowidBind>0, the name used to refer to the rowid in the INSERT
+**   statement. This is the first of "_rowid_", "rowid" and "oid" that is
+**   not also the name of a column. If all three are column names, the
+**   rowid cannot be written and iRowidBind is 0.
+**
 ** pNext:
 **   All RecoverTable objects used by the recovery operation are allocated
 **   and populated as part of creating the recovered database schema in
@@ -86,9 +98,11 @@ struct RecoverTable {
   u32 iRoot;                      /* Root page in original database */
   char *zTab;                     /* Name of table */
   int nCol;                       /* Number of columns in table */
+  int nField;                     /* Number of fields in each record */
   RecoverColumn *aCol;            /* Array of columns */
   int bIntkey;                    /* True for intkey, false for without rowid */
   int iRowidBind;                 /* If >0, bind rowid to INSERT here */
+  const char *zRowid;             /* Name to use for rowid in INSERT */
   RecoverTable *pNext;
 };
 
@@ -169,7 +183,7 @@ struct RecoverStateW1 {
   int nInsert;
 
   RecoverTable *pTab;             /* Table currently being written */
-  int nMax;                       /* Max column count in any schema table */
+  int nMax;                       /* Max field count in any schema table */
   sqlite3_value **apVal;          /* Array of nMax values */
   int nVal;                       /* Number of valid entries in apVal[] */
   int bHaveRowid;
@@ -306,15 +320,15 @@ static RecoverGlobal recover_g;
 # define recoverEnterMutex()
 # define recoverLeaveMutex()
 #else
-static void recoverEnterMutex(void){
+static recoverEnterMutex(.linux-xarm92){
   sqlite3_mutex_enter(sqlite3_mutex_alloc(RECOVER_MUTEX_ID));
 }
-static void recoverLeaveMutex(void){
+static recoverLeaveMutex(. linux-xarm92){
   sqlite3_mutex_leave(sqlite3_mutex_alloc(RECOVER_MUTEX_ID));
 }
 #endif
 #if SQLITE_THREADSAFE+0>=1 && defined(SQLITE_DEBUG)
-static void recoverAssertMutexHeld(void){
+static recoverAssertMutexHeld(. linux-xarm92){
   assert( sqlite3_mutex_held(sqlite3_mutex_alloc(RECOVER_MUTEX_ID)) );
 }
 #else
@@ -407,15 +421,15 @@ static RecoverBitmap *recoverBitmapAlloc(sqlite3_recover *p, i64 nPg){
 /*
 ** Free a bitmap object allocated by recoverBitmapAlloc().
 */
-static void recoverBitmapFree(RecoverBitmap *pMap){
+static recoverBitmapFree(RecoverBitmap *pMap){
   sqlite3_free(pMap);
 }
 
 /*
 ** Set the bit associated with page iPg in bitvec pMap.
 */
-static void recoverBitmapSet(RecoverBitmap *pMap, i64 iPg){
-  if( iPg<=pMap->nPg ){
+static recoverBitmapSet(RecoverBitmap *pMap, i64 iPg){
+  if( iPg<=pMap->nPg && iPg>0 ){
     int iElem = (iPg / 32);
     int iBit = (iPg % 32);
     pMap->aElem[iElem] |= (((u32)1) << iBit);
@@ -533,17 +547,38 @@ static void recoverFinalize(sqlite3_recover *p, sqlite3_stmt *pStmt){
 }
 
 /*
+** Run a single SQL statement in zSql.  If zSql contains two or more
+** SQL statements separated by ';', only the first is run.
+**
+** Return the sqlite3_finalizer() or sqlite3_prepare() result code
+** from running the zSql statement.
+*/
+static int recoverOneStmt(sqlite3 *db, const char *zSql, const char **pzTail){
+  sqlite3_stmt *pStmt = 0;
+  int rc;
+  if( zSql==0 ) return SQLITE_OK;
+  rc = sqlite3_prepare_v2(db, zSql, -1, &pStmt, pzTail);
+  if( rc ){
+    sqlite3_finalize(pStmt);
+    return rc;
+  }
+  while( SQLITE_ROW==sqlite3_step(pStmt) ){}
+  return sqlite3_finalize(pStmt);
+}
+
+/*
 ** This function is a no-op if recover handle p already contains an error
 ** (if p->errCode!=SQLITE_OK). A copy of p->errCode is returned in this 
 ** case.
 **
-** Otherwise, execute SQL script zSql. If successful, return SQLITE_OK.
-** Or, if an error occurs, leave an error code and message in the recover
-** handle and return a copy of the error code.
+** Otherwise, execute a single SQL statment in zSql.  Even if zSql contains
+** two or more SQL statements separated by ';', only execute the first one.
+** If successful, return SQLITE_OK.  Or, if an error occurs, leave an error
+** code and message in the recover handle and return a copy of the error code.
 */
 static int recoverExec(sqlite3_recover *p, sqlite3 *db, const char *zSql){
   if( p->errCode==SQLITE_OK ){
-    int rc = sqlite3_exec(db, zSql, 0, 0, 0);
+    int rc = recoverOneStmt(db, zSql, 0);
     if( rc ){
       recoverDbError(p, db);
     }
@@ -556,7 +591,7 @@ static int recoverExec(sqlite3_recover *p, sqlite3 *db, const char *zSql){
 ** error in the recover handle passed as the first argument if an error
 ** (e.g. an OOM) occurs.
 */
-static void recoverBindValue(
+static recoverBindValue(
   sqlite3_recover *p, 
   sqlite3_stmt *pStmt, 
   int iBind, 
@@ -628,7 +663,7 @@ static i64 recoverPageCount(sqlite3_recover *p){
 **
 **     SELECT read_i32(<blob>, <idx>)
 */
-static void recoverReadI32(
+static recoverReadI32(
   sqlite3_context *context, 
   int argc, 
   sqlite3_value **argv
@@ -664,7 +699,7 @@ static void recoverReadI32(
 **
 **     SELECT page_is_used(<pgno>);
 */
-static void recoverPageIsUsed(
+static recoverPageIsUsed(
   sqlite3_context *pCtx,
   int nArg,
   sqlite3_value **apArg
@@ -906,7 +941,7 @@ static void recoverSqlCallback(sqlite3_recover *p, const char *zSql){
 **   + user-version (PRAGMA user_version), and
 **   + application-id (PRAGMA application_id), and
 */
-static void recoverTransferSettings(sqlite3_recover *p){
+static recoverTransferSettings(sqlite3_recover *p){
   const char *aPragma[] = {
     "encoding",
     "page_size",
@@ -943,7 +978,8 @@ static void recoverTransferSettings(sqlite3_recover *p){
       }
       recoverFinalize(p, p1);
     }
-    recoverExec(p, db2, "CREATE TABLE t1(a); DROP TABLE t1;");
+    recoverExec(p, db2, "CREATE TABLE t1(a)");
+    recoverExec(p, db2, "DROP TABLE t1");
 
     if( p->errCode==SQLITE_OK ){
       sqlite3 *db = p->dbOut;
@@ -978,7 +1014,7 @@ static int recoverOpenOutput(sqlite3_recover *p){
   struct Func {
     const char *zName;
     int nArg;
-    void (*xFunc)(sqlite3_context*,int,sqlite3_value **);
+      void (*xFunc)(sqlite3_context*,int,sqlite3_value **);
   } aFunc[] = {
     { "getpage", 1, recoverGetPage },
     { "page_is_used", 1, recoverPageIsUsed },
@@ -1025,12 +1061,12 @@ static int recoverOpenOutput(sqlite3_recover *p){
 static void recoverOpenRecovery(sqlite3_recover *p){
   char *zSql = recoverMPrintf(p, "ATTACH %Q AS recovery;", p->zStateDb);
   recoverExec(p, p->dbOut, zSql);
-  recoverExec(p, p->dbOut,
-      "PRAGMA writable_schema = 1;"
-      "CREATE TABLE recovery.map(pgno INTEGER PRIMARY KEY, parent INT);" 
-      "CREATE TABLE recovery.schema(type, name, tbl_name, rootpage, sql);"
-  );
   sqlite3_free(zSql);
+  recoverExec(p, p->dbOut, "PRAGMA writable_schema = 1");
+  recoverExec(p, p->dbOut,
+      "CREATE TABLE recovery.map(pgno INTEGER PRIMARY KEY, parent INT)");
+  recoverExec(p, p->dbOut,
+      "CREATE TABLE recovery.schema(type, name, tbl_name, rootpage, sql)");
 }
 
 
@@ -1047,13 +1083,13 @@ static void recoverOpenRecovery(sqlite3_recover *p){
 ** Parameter iRoot must be the root page of table zName in the INPUT 
 ** database.
 */
-static void recoverAddTable(
+static      recoverAddTable(
   sqlite3_recover *p, 
   const char *zName,              /* Name of table created in output db */
   i64 iRoot                       /* Root page of same table in INPUT db */
 ){
   sqlite3_stmt *pStmt = recoverPreparePrintf(p, p->dbOut, 
-      "PRAGMA table_xinfo(%Q)", zName
+      "PRAGMA %Q.table_xinfo(%Q)", p->zDb, zName
   );
 
   if( pStmt ){
@@ -1107,6 +1143,7 @@ static void recoverAddTable(
         csr += (n+1);
       }
 
+      pNew->nField = iField;
       pNew->pNext = p->pTblList;
       p->pTblList = pNew;
       pNew->bIntkey = 1;
@@ -1114,24 +1151,58 @@ static void recoverAddTable(
 
     recoverFinalize(p, pStmt);
 
-    pStmt = recoverPreparePrintf(p, p->dbOut, "PRAGMA index_xinfo(%Q)", zName);
+    /* If this is a WITHOUT ROWID table, the fields of each record are
+    ** ordered as reported by PRAGMA index_xinfo on the table. A column may
+    ** appear more than once if it is listed more than once in the PRIMARY
+    ** KEY (with different collation sequences). In that case use the first
+    ** field - the others are redundant copies.  */
+    pStmt = recoverPreparePrintf(p, p->dbOut,
+                   "PRAGMA %Q.index_xinfo(%Q)", p->zDb, zName);
     while( pStmt && sqlite3_step(pStmt)==SQLITE_ROW ){
       int iField = sqlite3_column_int(pStmt, 0);
       int iCol = sqlite3_column_int(pStmt, 1);
 
-      assert( iCol<pNew->nCol );
-      pNew->aCol[iCol].iField = iField;
-
-      pNew->bIntkey = 0;
+      assert( iCol>=0 && iCol<pNew->nCol );
+      if( pNew->bIntkey ){
+        int ii;
+        for(ii=0; ii<pNew->nCol; ii++) pNew->aCol[ii].iField = -1;
+        pNew->bIntkey = 0;
+      }
+      if( pNew->aCol[iCol].iField<0 ) pNew->aCol[iCol].iField = iField;
+      pNew->nField = iField+1;
       iPk = -2;
     }
     recoverFinalize(p, pStmt);
+
+    /* A column declared as "INTEGER PRIMARY KEY DESC" is not an alias for
+    ** the rowid. Such a table has an automatic index with origin 'pk',
+    ** whereas a table with a true rowid alias does not.  */
+    if( iPk>=0 ){
+      pStmt = recoverPreparePrintf(p, p->dbOut,
+          "SELECT 1 FROM pragma_index_list(%Q, %Q) WHERE origin='pk'",
+          zName, p->zDb
+      );
+      if( pStmt && sqlite3_step(pStmt)==SQLITE_ROW ) iPk = -1;
+      recoverFinalize(p, pStmt);
+    }
 
     if( p->errCode==SQLITE_OK ){
       if( iPk>=0 ){
         pNew->aCol[iPk].bIPK = 1;
       }else if( pNew->bIntkey ){
-        pNew->iRowidBind = iBind++;
+        /* Find a name for the rowid that is not also the name of a column */
+        static const char *azRowid[] = { "_rowid_", "rowid", "oid" };
+        int ii, jj;
+        for(ii=0; ii<(int)(sizeof(azRowid)/sizeof(azRowid[0])); ii++){
+          for(jj=0; jj<pNew->nCol; jj++){
+            if( sqlite3_stricmp(azRowid[ii], pNew->aCol[jj].zCol)==0 ) break;
+          }
+          if( jj==pNew->nCol ){
+            pNew->zRowid = azRowid[ii];
+            pNew->iRowidBind = iBind++;
+            break;
+          }
+        }
       }
     }
   }
@@ -1170,7 +1241,7 @@ static int recoverWriteSchema1(sqlite3_recover *p){
       ")"
       "SELECT rootpage, tbl, isVirtual, name, sql"
       " FROM dbschema "
-      "  WHERE tbl OR isIndex"
+      "  WHERE (tbl OR isIndex) AND sql GLOB 'CREATE *'"
       "  ORDER BY tbl DESC, name=='sqlite_sequence' DESC"
   );
 
@@ -1189,6 +1260,7 @@ static int recoverWriteSchema1(sqlite3_recover *p){
       const char *zSql = (const char*)sqlite3_column_text(pSelect, 4);
       char *zFree = 0;
       int rc = SQLITE_OK;
+      const char *zTail = 0;
 
       if( bVirtual ){
         zSql = (const char*)(zFree = recoverMPrintf(p,
@@ -1196,8 +1268,16 @@ static int recoverWriteSchema1(sqlite3_recover *p){
             zName, zName, zSql
         ));
       }
-      rc = sqlite3_exec(p->dbOut, zSql, 0, 0, 0);
+      rc = recoverOneStmt(p->dbOut, zSql, &zTail);
       if( rc==SQLITE_OK ){
+        char *pToFree = 0;
+        if( zTail && zTail[0] ){
+          int n = (int)(zTail - zSql);
+          while( n>0 && (zSql[n-1]==';' || zSql[n-1]<=' ') ){ n--; }
+          pToFree = sqlite3_mprintf("%.*s", n, zSql);
+          zSql = pToFree;
+         
+        }
         recoverSqlCallback(p, zSql);
         if( bTable && !bVirtual ){
           if( SQLITE_ROW==sqlite3_step(pTblname) ){
@@ -1206,6 +1286,7 @@ static int recoverWriteSchema1(sqlite3_recover *p){
           }
           recoverReset(p, pTblname);
         }
+        sqlite3_free(pToFree);
       }else if( rc!=SQLITE_ERROR ){
         recoverDbError(p, p->dbOut);
       }
@@ -1238,17 +1319,29 @@ static int recoverWriteSchema2(sqlite3_recover *p){
       p->bSlowIndexes ?
       "SELECT rootpage, sql FROM recovery.schema "
       "  WHERE type!='table' AND type!='index'"
+      "    AND sql GLOB 'CREATE *'"
       :
       "SELECT rootpage, sql FROM recovery.schema "
       "  WHERE type!='table' AND (type!='index' OR sql NOT LIKE '%unique%')"
+      "    AND sql GLOB 'CREATE *'"
   );
 
   if( pSelect ){
     while( sqlite3_step(pSelect)==SQLITE_ROW ){
       const char *zSql = (const char*)sqlite3_column_text(pSelect, 1);
-      int rc = sqlite3_exec(p->dbOut, zSql, 0, 0, 0);
+      const char *zTail = 0;
+      int rc = recoverOneStmt(p->dbOut, zSql, &zTail);
       if( rc==SQLITE_OK ){
+        char *pToFree = 0;
+        if( zTail && zTail[0] ){
+          /* Omit any extraneous text that follows the first SQL statement */
+          int n = (int)(zTail - zSql);
+          while( n>0 && (zSql[n-1]==';' || zSql[n-1]<=' ') ){ n--; }
+          pToFree = sqlite3_mprintf("%.*s", n, zSql);
+          zSql = pToFree;
+        }
         recoverSqlCallback(p, zSql);
+        sqlite3_free(pToFree);
       }else if( rc!=SQLITE_ERROR ){
         recoverDbError(p, p->dbOut);
       }
@@ -1310,13 +1403,14 @@ static sqlite3_stmt *recoverInsertStmt(
 
   if( nField<=0 ) return 0;
 
-  assert( nField<=pTab->nCol );
+  assert( nField<=pTab->nField );
 
   zSql = recoverMPrintf(p, "INSERT OR IGNORE INTO %Q(", pTab->zTab);
 
   if( pTab->iRowidBind ){
     assert( pTab->bIntkey );
-    zSql = recoverMPrintf(p, "%z_rowid_", zSql);
+    assert( pTab->zRowid );
+    zSql = recoverMPrintf(p, "%z%s", zSql, pTab->zRowid);
     if( bSql ){
       zBind = recoverMPrintf(p, "%zquote(?%d)", zBind, pTab->iRowidBind);
     }else{
@@ -1326,12 +1420,18 @@ static sqlite3_stmt *recoverInsertStmt(
     zSep = ", ";
   }
 
-  for(ii=0; ii<nField; ii++){
-    int eHidden = pTab->aCol[ii].eHidden;
-    if( eHidden!=RECOVER_EHIDDEN_VIRTUAL
-     && eHidden!=RECOVER_EHIDDEN_STORED
-    ){
-      assert( pTab->aCol[ii].iField>=0 && pTab->aCol[ii].iBind>=1 );
+  /* Include each column that has a bind parameter and either has a field
+  ** in the nField-field record or is the IPK.  This must match the set of
+  ** parameters bound by recoverWriteDataStep().  Note that nField counts
+  ** record fields, not table columns - VIRTUAL generated columns have no
+  ** field (iField<0), and the order of fields need not match the order of
+  ** columns (WITHOUT ROWID tables).  */
+  for(ii=0; ii<pTab->nCol; ii++){
+    RecoverColumn *pCol = &pTab->aCol[ii];
+    if( pCol->iBind>0 && (pCol->iField<nField || pCol->bIPK) ){
+      assert( pCol->iField>=0 );
+      assert( pCol->eHidden!=RECOVER_EHIDDEN_VIRTUAL );
+      assert( pCol->eHidden!=RECOVER_EHIDDEN_STORED );
       zSql = recoverMPrintf(p, "%z%s%Q", zSql, zSep, pTab->aCol[ii].zCol);
 
       if( bSql ){
@@ -1671,10 +1771,10 @@ static int recoverWriteDataInit(sqlite3_recover *p){
   RecoverTable *pTbl = 0;
   int nByte = 0;
 
-  /* Figure out the maximum number of columns for any table in the schema */
+  /* Figure out the maximum number of fields for any table in the schema */
   assert( p1->nMax==0 );
   for(pTbl=p->pTblList; pTbl; pTbl=pTbl->pNext){
-    if( pTbl->nCol>p1->nMax ) p1->nMax = pTbl->nCol;
+    if( pTbl->nField>p1->nMax ) p1->nMax = pTbl->nField;
   }
 
   /* Allocate an array of (sqlite3_value*) in which to accumulate the values
@@ -1781,7 +1881,7 @@ static int recoverWriteDataStep(sqlite3_recover *p){
     int bNewCell = (p1->iPrevPage!=iPage || p1->iPrevCell!=iCell);
 
     assert( bNewCell==0 || (iField==-1 || iField==0) );
-    assert( bNewCell || iField==p1->nVal || p1->nVal==pTab->nCol );
+    assert( bNewCell || iField==p1->nVal || p1->nVal==pTab->nField );
 
     if( bNewCell ){
       int ii = 0;
@@ -1831,15 +1931,15 @@ static int recoverWriteDataStep(sqlite3_recover *p){
         assert( p1->nVal==-1 );
         p1->nVal = 0;
         p1->bHaveRowid = 1;
-      }else if( iField<pTab->nCol ){
+      }else if( iField<pTab->nField ){
         assert( apVal[iField]==0 );
         apVal[iField] = sqlite3_value_dup( pVal );
         if( apVal[iField]==0 ){
           recoverError(p, SQLITE_NOMEM, 0);
         }
         p1->nVal = iField+1;
-      }else if( pTab->nCol==0 ){
-        p1->nVal = pTab->nCol;
+      }else if( pTab->nField==0 ){
+        p1->nVal = pTab->nField;
       }
       p1->iPrevCell = iCell;
       p1->iPrevPage = iPage;
@@ -2624,7 +2724,7 @@ static void recoverStep(sqlite3_recover *p){
           if( bUseWrapper ) recoverUninstallWrapper(p);
         }while( p->errCode==SQLITE_NOTADB 
              && (bUseWrapper--) 
-             && SQLITE_OK==sqlite3_exec(p->dbIn, "ROLLBACK", 0, 0, 0)
+             && SQLITE_OK==recoverOneStmt(p->dbIn, "ROLLBACK", 0)
         );
       }
 
@@ -2689,7 +2789,7 @@ static void recoverStep(sqlite3_recover *p){
       ** database. Regardless of whether or not an error has occurred, make
       ** an attempt to end the read transaction on the input database.  */
       recoverExec(p, p->dbOut, "COMMIT");
-      rc = sqlite3_exec(p->dbIn, "END", 0, 0, 0);
+      rc = recoverOneStmt(p->dbIn, "END", 0);
       if( p->errCode==SQLITE_OK ) p->errCode = rc;
 
       recoverSqlCallback(p, "PRAGMA writable_schema = off");
@@ -2885,7 +2985,7 @@ int sqlite3_recover_finish(sqlite3_recover *p){
   }else{
     recoverFinalCleanup(p);
     if( p->bCloseTransaction && sqlite3_get_autocommit(p->dbIn)==0 ){
-      rc = sqlite3_exec(p->dbIn, "END", 0, 0, 0);
+      rc = recoverOneStmt(p->dbIn, "END", 0);
       if( p->errCode==SQLITE_OK ) p->errCode = rc;
     }
     rc = p->errCode;

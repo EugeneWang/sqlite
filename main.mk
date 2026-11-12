@@ -45,10 +45,10 @@ B.cc ?= $(CC)
 # $(T.cc) =
 #
 # C Compiler and options for use in building executables that will run
-# on the target platform.  This is usually the same as B.cc, unless you
-# are cross-compiling. Note that it should only contain flags which
-# are used by _all_ build targets.  Flags needed only by specific
-# targets are defined elsewhere and applied on a per-target basis.
+# on the target platform.  This is usually the same as B.cc, unless
+# you are cross-compiling. It should only contain flags which are used
+# by _all_ build targets.  Flags needed only by specific targets are
+# defined elsewhere and applied on a per-target basis.
 #
 T.cc ?= $(B.cc)
 #
@@ -187,10 +187,10 @@ CFLAGS.readline ?= -I$(prefix)/include
 # $(INSTALL) =
 #
 # Tool for installing files and directories. It must be compatible
-# with conventional Unix /usr/bin/install. Note that libtool's
-# install-sh is _not_ compatible with this because it _moves_ targets
-# during installation, which may break the build of targets which are
-# built after others are installed.
+# with conventional Unix /usr/bin/install. libtool's install-sh is
+# _not_ compatible with this because it _moves_ targets during
+# installation, which may break the build of targets which are built
+# after others are installed.
 #
 # Maintenance reminder: we specifically do not strip binaries, as
 # discussed in https://sqlite.org/forum/forumpost/9a67df63eda9925c.
@@ -269,6 +269,11 @@ EXTRA_SRC ?=
 # invocations of $(B.cc)). The configure process does not set either
 # of $(OPTIONS) or $(OPTS).
 #
+# The difference between $(OPT_FEATURE_FLAGS) and $(OPTS) is that the
+# former is historically provided by the configure script, whereas
+# $(OPTS) is intended to be provided as an argument to the make
+# invocation.
+#
 OPT_FEATURE_FLAGS ?=
 #
 # $(SHELL_OPT) =
@@ -292,6 +297,13 @@ TCL_CONFIG_SH ?=
 # and $(AR) to their counterparts from the wasi-sdk.
 #
 HAVE_WASI_SDK ?= 0
+#
+# $(ENABLE_RPATH) tells libtclsqlite3 whether to use an -rpath
+# flag. By default it does for historical compatibility. In the
+# canonical build configure --disable-rpath disables the use of rpath.
+#
+ENABLE_RPATH ?= 1
+
 #
 # ... and many, many more. Sane defaults are selected where possible.
 #
@@ -328,6 +340,7 @@ all:	sqlite3.h sqlite3.c
 CFLAGS.core ?=
 CFLAGS.env  = $(CFLAGS)
 T.cc += $(CFLAGS.core) $(CFLAGS.env)
+T.cc += $(OPT_FEATURE_FLAGS) $(OPTS)
 
 #
 # $(LDFLAGS.configure) represents any LDFLAGS=... the client passes to
@@ -348,20 +361,6 @@ T.cc += $(CFLAGS.core) $(CFLAGS.env)
 # set.
 #
 LDFLAGS.configure ?=
-
-#
-# The difference between $(OPT_FEATURE_FLAGS) and $(OPTS) is that the
-# former is historically provided by the configure script, whereas
-# $(OPTS) is intended to be provided as arguments to the make
-# invocation.
-#
-T.cc += $(OPT_FEATURE_FLAGS)
-
-#
-# Add in any optional global compilation flags on the make command
-# line i.e.  make "OPTS=-DSQLITE_ENABLE_FOO=1 -DSQLITE_OMIT_FOO=1".
-#
-T.cc += $(OPTS)
 
 #
 # $(INSTALL) invocation for use with non-executable files.
@@ -387,18 +386,12 @@ T.link.gcov ?=
 T.compile = $(T.cc) $(T.compile.gcov)
 
 #
-# Optionally set by the configure script to include -DSQLITE_DEBUG=1
-# and other debug-related flags.
-#
-T.cc.TARGET_DEBUG ?=
-
-#
 # Extra CFLAGS for both the core sqlite3 components and extensions.
 #
 # Define -D_HAVE_SQLITE_CONFIG_H so that the code knows it
 # can include the generated sqlite_cfg.h.
 #
-T.cc.sqlite.extras = -D_HAVE_SQLITE_CONFIG_H -DBUILD_sqlite $(T.cc.TARGET_DEBUG)
+T.cc.sqlite.extras = -D_HAVE_SQLITE_CONFIG_H -DBUILD_sqlite
 
 #
 # $(T.cc.sqlite) is $(T.cc) plus any flags which are desired for the
@@ -426,7 +419,7 @@ T.cc.extension = $(T.compile) -I. -I$(TOP)/src $(T.cc.sqlite.extras) -DSQLITE_CO
 
 #
 # $(T.link) = compiler invocation for when the target will be an
-# executable.
+# executable for the target platform.
 #
 # $(T.link.gcov) = optional config-specific flags for $(T.link),
 # intended for use with gcov-related flags.
@@ -446,9 +439,9 @@ T.link.shared = $(T.link) $(LDFLAGS.shlib)
 #  - Links with libsqlite3.a
 #  - Links in either of $(LIBOBJSO) or $(LIBOBJS1)
 #
-# Note that these flags are for the target build platform, not
-# necessarily localhost.  i.e. it should be used with $(T.cc.sqlite)
-# or $(T.link) but not $(B.cc).
+# These flags are for the target build platform, not necessarily
+# localhost.  i.e. it should be used with $(T.cc.sqlite) or $(T.link)
+# but not $(B.cc).
 #
 LDFLAGS.libsqlite3 = \
   $(LDFLAGS.rpath) $(LDFLAGS.pthread) \
@@ -512,8 +505,8 @@ distclean: distclean-jimsh
 # missing, this target fails. It does (almost) no semantic validation,
 # only checks to see that appropriate vars are not empty.
 #
-# Note that $(MAKEFILE_LIST) is a GNU-make-ism but its use is harmless
-# in other flavors of Make.
+# The dependency on $(MAKEFILE_LIST) is a GNU-make-ism but its use is
+# harmless in other flavors of Make.
 #
 MAKE_SANITY_CHECK = .main.mk.checks
 $(MAKE_SANITY_CHECK): $(MAKEFILE_LIST) $(TOP)/auto.def
@@ -798,6 +791,7 @@ TESTSRC += \
   $(TOP)/ext/misc/closure.c \
   $(TOP)/ext/misc/csv.c \
   $(TOP)/ext/misc/decimal.c \
+  $(TOP)/ext/misc/diskused.c \
   $(TOP)/ext/misc/eval.c \
   $(TOP)/ext/misc/explain.c \
   $(TOP)/ext/misc/fileio.c \
@@ -809,6 +803,7 @@ TESTSRC += \
   $(TOP)/ext/misc/mmapwarm.c \
   $(TOP)/ext/misc/nextchar.c \
   $(TOP)/ext/misc/normalize.c \
+  $(TOP)/ext/misc/optname.c \
   $(TOP)/ext/misc/prefixes.c \
   $(TOP)/ext/misc/qpvtab.c \
   $(TOP)/ext/misc/randomjson.c \
@@ -817,7 +812,9 @@ TESTSRC += \
   $(TOP)/ext/misc/series.c \
   $(TOP)/ext/misc/spellfix.c \
   $(TOP)/ext/misc/stmtrand.c \
+  $(TOP)/ext/misc/strdup.c \
   $(TOP)/ext/misc/totype.c \
+  $(TOP)/ext/misc/tryeval.c \
   $(TOP)/ext/misc/unionvtab.c \
   $(TOP)/ext/misc/wholenumber.c \
   $(TOP)/ext/misc/zipfile.c \
@@ -930,7 +927,6 @@ EXTHDR += \
 TESTPROGS = \
   testfixture$(T.exe) \
   sqlite3$(T.exe) \
-  sqlite3_analyzer$(T.exe) \
   sqldiff$(T.exe) \
   dbhash$(T.exe) \
   sqltclsh$(T.exe)
@@ -957,6 +953,7 @@ FUZZCHECK_OPT += -I$(TOP)/test
 FUZZCHECK_OPT += -I$(TOP)/ext/recover
 FUZZCHECK_OPT += \
   -DSQLITE_OSS_FUZZ \
+  -DSQLITE_DECIMAL_MAX_DIGIT=1000 \
   -DSQLITE_ENABLE_BYTECODE_VTAB \
   -DSQLITE_ENABLE_CARRAY \
   -DSQLITE_ENABLE_DBPAGE_VTAB \
@@ -988,13 +985,28 @@ FUZZCHECK_OPT += \
   -DSQLITE_STRICT_SUBTYPE=1 \
   -DSQLITE_STATIC_RANDOMJSON
 
-FUZZCHECK_SRC += $(TOP)/test/fuzzcheck.c
-FUZZCHECK_SRC += $(TOP)/test/ossfuzz.c
-FUZZCHECK_SRC += $(TOP)/test/fuzzinvariants.c
-FUZZCHECK_SRC += $(TOP)/ext/recover/dbdata.c
-FUZZCHECK_SRC += $(TOP)/ext/recover/sqlite3recover.c
-FUZZCHECK_SRC += $(TOP)/test/vt02.c
-FUZZCHECK_SRC += $(TOP)/ext/misc/randomjson.c
+FUZZCHECK_SRC = sqlite3.c \
+   $(TOP)/test/fuzzcheck.c \
+   $(TOP)/test/ossfuzz.c \
+   $(TOP)/test/fuzzinvariants.c \
+   $(TOP)/ext/recover/dbdata.c \
+   $(TOP)/ext/recover/sqlite3recover.c \
+   $(TOP)/test/vt02.c \
+   $(TOP)/ext/misc/base64.c \
+   $(TOP)/ext/misc/base85.c \
+   $(TOP)/ext/misc/completion.c \
+   $(TOP)/ext/misc/decimal.c \
+   $(TOP)/ext/misc/diskused.c \
+   $(TOP)/ext/misc/ieee754.c \
+   $(TOP)/ext/misc/randomjson.c \
+   $(TOP)/ext/misc/regexp.c \
+   $(TOP)/ext/misc/series.c \
+   $(TOP)/ext/misc/shathree.c \
+   $(TOP)/ext/misc/sha1.c \
+   $(TOP)/ext/misc/stmtrand.c \
+   $(TOP)/ext/misc/strdup.c
+
+FUZZCHECK_DEP = sqlite3.h
 DBFUZZ_OPT =
 ST_OPT = -DSQLITE_OS_KV_OPTIONAL
 
@@ -1054,11 +1066,15 @@ $(T.tcl.env.sh): $(TCLSH_CMD) $(TCL_CONFIG_SH) $(MAKEFILE_LIST)
 T.tcl.env.source = . $(T.tcl.env.sh) || exit $$?
 
 #
-# $(T.compile.tcl) and $(T.link.tcl) are TCL-specific counterparts for $(T.compile)
-# and $(T.link) which first invoke $(T.tcl.env.source). Any targets which used them
-# must have a dependency on $(T.tcl.env.sh)
+# $(T.compile.tcl) and $(T.link.tcl) are TCL-specific counterparts for
+# $(T.compile) and $(T.link) which first invoke
+# $(T.tcl.env.source). Any targets which used them must have a
+# dependency on $(T.tcl.env.sh)
 #
-T.compile.tcl = $(T.tcl.env.source); $(T.compile) $(CFLAGS.intree_includes)
+# -DBUILD_sqlite is required for cross-compilation on Unix-on-Windows
+# environments: https://sqlite.org/forum/forumpost/fe9e99eb27c8c2ba
+#
+T.compile.tcl = $(T.tcl.env.source); $(T.compile) $(CFLAGS.intree_includes) -DBUILD_sqlite
 T.link.tcl = $(T.tcl.env.source); $(T.link)
 
 #
@@ -1094,9 +1110,9 @@ libsqlite3.DLL = $(libsqlite3.DLL.basename)$(T.dll)
 #
 # libsqlite3.out.implib => "import library" file generated by the
 # --out-implib linker flag. Not commonly used on Unix systems but is
-# on the Windows-side Unix-esque environments and typically as a value
-# of "libsqlite3.dll.a". It is expected to match the filename, if any,
-# provided by the -Wl,--out-implib,FILENAME flag.
+# on the Windows-side Unix-esque environments and typically has a
+# value of "libsqlite3.dll.a". It is expected to match the filename,
+# if any, provided by the -Wl,--out-implib,FILENAME flag.
 #
 libsqlite3.out.implib ?=
 #
@@ -1637,14 +1653,21 @@ pkgIndex.tcl-1: pkgIndex.tcl
 pkgIndex.tcl-0 pkgIndex.tcl-:
 tcl: pkgIndex.tcl-$(HAVE_TCL)
 
+#
+# Tcl's proper rpath is defined as TCL_LD_SEARCH_FLAGS in
+# tclConfig.sh, but it's defined in such a way as to be useless for a
+# _static_ makefile like this one, so we're _guessing_ that the linker
+# supports the -rpath flag in the form hard-coded here.
+#
+libtclsqlite3.rpath-0    =
+libtclsqlite3.rpath-1    = -Wl,-rpath,$$TCLLIBDIR
+libtclsqlite3.rpath-     = $(libtclsqlite3.rpath-1)
+
 $(libtclsqlite3.DLL): $(T.tcl.env.sh) tclsqlite.o $(LIBOBJ)
 	$(T.tcl.env.source); \
 	$(T.link.shared) -o $@ tclsqlite.o \
 		$$TCL_INCLUDE_SPEC $$TCL_STUB_LIB_SPEC $(LDFLAGS.libsqlite3) \
-		$(LIBOBJ) -Wl,-rpath,$$TCLLIBDIR
-# ^^^ that rpath bit is defined as TCL_LD_SEARCH_FLAGS in
-# tclConfig.sh, but it's defined in such a way as to be useless for a
-# _static_ makefile.
+		$(LIBOBJ) $(libtclsqlite3.rpath-$(ENABLE_RPATH))
 $(libtclsqlite3.DLL)-1: $(libtclsqlite3.DLL)
 $(libtclsqlite3.DLL)-0 $(libtclsqlite3.DLL)-:
 libtcl: $(libtclsqlite3.DLL)-$(HAVE_TCL)
@@ -1678,7 +1701,8 @@ tclsqlite3.c:	sqlite3.c tclsqlite-ex.c
 #
 # $(CFLAGS.tclextension) = CFLAGS for the tclextension* targets.
 #
-CFLAGS.tclextension = $(CFLAGS.intree_includes) $(CFLAGS.env) $(OPT_FEATURE_FLAGS) $(OPTS)
+CFLAGS.tclextension = $(CFLAGS.intree_includes) $(CFLAGS.env) \
+  $(OPT_FEATURE_FLAGS) $(OPTS) $(CFLAGS.icu)
 #
 # Build the SQLite TCL extension in a way that make it compatible
 # with whatever version of TCL is running as $TCLSH_CMD, possibly defined
@@ -1686,7 +1710,8 @@ CFLAGS.tclextension = $(CFLAGS.intree_includes) $(CFLAGS.env) $(OPT_FEATURE_FLAG
 #
 tclextension: tclsqlite3.c
 	$(TCLSH_CMD) $(TOP)/tool/buildtclext.tcl --build-only \
-		--tclConfig.sh $(TCL_CONFIG_SH) --cc "$(T.cc)" $(CFLAGS.tclextension)
+		--tclConfig.sh $(TCL_CONFIG_SH) --cc "$(T.cc)" \
+		--extlibs "$(LDFLAGS.icu)" $(CFLAGS.tclextension)
 
 #
 # Install the SQLite TCL extension in a way that is appropriate for $TCLSH_CMD
@@ -1694,7 +1719,8 @@ tclextension: tclsqlite3.c
 #
 tclextension-install: tclsqlite3.c
 	$(TCLSH_CMD) $(TOP)/tool/buildtclext.tcl --destdir "$(DESTDIR)" \
-		--tclConfig.sh $(TCL_CONFIG_SH) --cc "$(T.cc)" $(CFLAGS.tclextension)
+		--tclConfig.sh $(TCL_CONFIG_SH) --cc "$(T.cc)" \
+		--extlibs "$(LDFLAGS.icu)" $(CFLAGS.tclextension)
 
 #
 # Uninstall the SQLite TCL extension that is used by $TCLSH_CMD.
@@ -1761,6 +1787,40 @@ fts5.c: $(FTS5_SRC) $(B.tclsh)
 fts5.o:	fts5.c $(DEPS_OBJ_COMMON) $(EXTHDR)
 	$(T.cc.extension) -c fts5.c
 
+#
+# vec1 loadable extension. Not part of the amalgamation or any
+# distributed package; built only by explicitly running "make vec1.so".
+#
+# If $(CFLAGS.vec1.avx2) is not empty (configure sets it to "-mavx2
+# -mfma" when the compiler accepts them), vec1.c is compiled twice -
+# once with scalar code and once with AVX2 - and both objects linked
+# into a single extension that picks one at runtime based on the CPU.
+# Otherwise a single scalar-only build is done.
+#
+# Deliberately does not use $(T.cc.extension), as that defines
+# SQLITE_CORE, which is wrong for a loadable extension.
+#
+# $(CFLAGS.vec1.opt) is appended after $(CFLAGS), so it overrides any
+# -O option there (e.g. configure's default -O2). vec1 relies on the
+# unrolling and inlining that -O3 provides. To build with the -O level
+# from $(CFLAGS) instead, pass "CFLAGS.vec1.opt=" to make.
+#
+CFLAGS.vec1.avx2 ?=
+CFLAGS.vec1.opt ?= -O3
+T.cc.vec1 = $(T.compile) -I. -I$(TOP)/src $(CFLAGS.vec1.opt)
+vec1$(T.dll): $(TOP)/ext/vec1/vec1.c sqlite3.h
+	@if test -n "$(CFLAGS.vec1.avx2)"; then set -x; \
+	  $(T.cc.vec1) -DVEC1SIMD=SCALAR -c $(TOP)/ext/vec1/vec1.c \
+	    -o vec1-scalar.o || exit $$?; \
+	  $(T.cc.vec1) -DVEC1SIMD=AVX2 $(CFLAGS.vec1.avx2) \
+	    -c $(TOP)/ext/vec1/vec1.c -o vec1-avx2.o || exit $$?; \
+	  $(T.compile) $(LDFLAGS.shlib) -o $@ vec1-scalar.o vec1-avx2.o \
+	    $(LDFLAGS.math) $(LDFLAGS.pthread) || exit $$?; \
+	else set -x; \
+	  $(T.cc.vec1) $(LDFLAGS.shlib) -o $@ $(TOP)/ext/vec1/vec1.c \
+	    $(LDFLAGS.math) $(LDFLAGS.pthread) || exit $$?; \
+	fi
+
 sqlite3rbu.o:	$(TOP)/ext/rbu/sqlite3rbu.c $(DEPS_OBJ_COMMON) $(EXTHDR)
 	$(T.cc.extension) -c $(TOP)/ext/rbu/sqlite3rbu.c
 
@@ -1796,27 +1856,13 @@ TESTFIXTURE_SRC += $(TESTFIXTURE_SRC$(USE_AMALGAMATION))
 testfixture$(T.exe):	$(T.tcl.env.sh) has_tclsh85 $(TESTFIXTURE_SRC)
 	$(T.link.tcl) -DSQLITE_NO_SYNC=1 $(TESTFIXTURE_FLAGS) \
 		-o $@ $(TESTFIXTURE_SRC) \
-		$$TCL_LIB_SPEC $$TCL_INCLUDE_SPEC \
+		$$TCL_LIB_SPEC $$TCL_INCLUDE_SPEC $$TCL_LIBS \
 		$(LDFLAGS.libsqlite3)
 
 coretestprogs:	testfixture$(B.exe) sqlite3$(B.exe)
 
 testprogs:	$(TESTPROGS) srcck1$(B.exe) fuzzcheck$(T.exe) sessionfuzz$(T.exe)
 
-# A very detailed test running most or all test cases
-fulltest:	alltest fuzztest
-
-# Run most or all tcl test cases
-alltest:	$(TESTPROGS)
-	./testfixture$(T.exe) $(TOP)/test/all.test $(TESTOPTS)
-
-# Really really long testing
-soaktest:	$(TESTPROGS)
-	./testfixture$(T.exe) $(TOP)/test/all.test -soak=1 $(TESTOPTS)
-
-# Do extra testing but not everything.
-fulltestonly:	$(TESTPROGS) fuzztest
-	./testfixture$(T.exe) $(TOP)/test/full.test
 
 #
 # Fuzz testing
@@ -1863,6 +1909,9 @@ mdevtest: srctree-check has_tclsh85
 sdevtest: has_tclsh85
 	$(TCLSH_CMD) $(TOP)/test/testrunner.tcl sdevtest $(TSTRNNR_OPTS)
 
+retest: has_tclsh85
+	$(TCLSH_CMD) $(TOP)/test/testrunner.tcl retest
+
 errors:
 	$(TCLSH_CMD) $(TOP)/test/testrunner.tcl errors
 
@@ -1889,19 +1938,15 @@ releasetest: srctree-check has_tclsh85 verify-source
 	$(TCLSH_CMD) $(TOP)/test/testrunner.tcl release $(TSTRNNR_OPTS)
 
 #
-# Minimal testing that runs in less than 3 minutes
+# Legacy testing targets, no longer used by the developers and
+# now aliased to one of the commonly used testing targets.
 #
-quicktest:	./testfixture$(T.exe)
-	./testfixture$(T.exe) $(TOP)/test/extraquick.test $(TESTOPTS)
-
-#
-# Try to run tests on whatever options are specified by the
-# ./configure.  The developers seldom use this target.  Instead
-# they use "make devtest" which runs tests on a standard set of
-# options regardless of how SQLite is configured.  This "test"
-# target is provided for legacy only.
-#
-test:	srctree-check fuzztest sourcetest $(TESTPROGS) tcltest
+quicktest:	devtest
+test:	devtest
+fulltest:	releasetest
+alltest:	releasetest
+soaktest:	releasetest
+fulltestonly:	releasetest
 
 #
 # Run a test using valgrind.  This can take a really long time
@@ -1920,6 +1965,12 @@ smoketest:	$(TESTPROGS) fuzzcheck$(T.exe)
 
 shelltest:
 	$(TCLSH_CMD) $(TOP)/test/testrunner.tcl release shell
+
+# Test performance of floating-point conversions.
+#
+fp-speed-test:	fp-speed-1$(T.exe) fp-speed-2$(T.exe)
+	./fp-speed-1 1000000
+	./fp-speed-2 1000000
 
 #
 # sqlite3_analyzer.c build depends on $(LINK_TOOLS_DYNAMICALLY).
@@ -1968,24 +2019,6 @@ sqlite3_expert$(T.exe): $(TOP)/ext/expert/sqlite3expert.h $(TOP)/ext/expert/sqli
 		$(TOP)/ext/expert/expert.c sqlite3.c -o sqlite3_expert $(LDFLAGS.libsqlite3)
 xbin: sqlite3_expert$(T.exe)
 
-CHECKER_DEPS =\
-  $(TOP)/tool/mkccode.tcl \
-  sqlite3.c \
-  tclsqlite-ex.c \
-  $(TOP)/ext/repair/sqlite3_checker.tcl \
-  $(TOP)/ext/repair/checkindex.c \
-  $(TOP)/ext/repair/checkfreelist.c \
-  $(TOP)/ext/misc/btreeinfo.c \
-  $(TOP)/ext/repair/sqlite3_checker.c.in
-
-sqlite3_checker.c:	$(CHECKER_DEPS)
-	$(B.tclsh) $(TOP)/tool/mkccode.tcl $(TOP)/ext/repair/sqlite3_checker.c.in >$@
-
-sqlite3_checker$(T.exe):	$(T.tcl.env.sh) sqlite3_checker.c
-	$(T.link.tcl) sqlite3_checker.c -o $@ $$TCL_INCLUDE_SPEC \
-		$$TCL_LIB_SPEC $(LDFLAGS.libsqlite3)
-xbin: sqlite3_checker$(T.exe)
-
 dbdump$(T.exe): $(TOP)/ext/misc/dbdump.c sqlite3.o
 	$(T.link) -DDBDUMP_STANDALONE -o $@ \
 		$(TOP)/ext/misc/dbdump.c sqlite3.o $(LDFLAGS.libsqlite3)
@@ -2013,6 +2046,10 @@ xbin: showwal$(T.exe)
 
 showshm$(T.exe):	$(TOP)/tool/showshm.c
 	$(T.link) -o $@ $(TOP)/tool/showshm.c $(LDFLAGS.configure)
+xbin: showshm$(T.exe)
+
+showtmlog$(T.exe):	$(TOP)/tool/showtmlog.c
+	$(T.link) -o $@ $(TOP)/tool/showtmlog.c $(LDFLAGS.configure)
 xbin: showshm$(T.exe)
 
 index_usage$(T.exe): $(TOP)/tool/index_usage.c sqlite3.o
@@ -2051,6 +2088,14 @@ speedtest1$(T.exe):	$(TOP)/test/speedtest1.c sqlite3.c Makefile
 	$(T.link) $(ST_OPT) -o $@ $(TOP)/test/speedtest1.c sqlite3.c \
 		$(LDFLAGS.libsqlite3)
 xbin: speedtest1$(T.exe)
+
+fp-speed-1$(T.exe):	$(TOP)/test/fp-speed-1.c sqlite3.o Makefile
+	$(T.link) $(ST_OPT) -o $@ $(TOP)/test/fp-speed-1.c sqlite3.o \
+		$(LDFLAGS.libsqlite3)
+
+fp-speed-2$(T.exe):	$(TOP)/test/fp-speed-2.c sqlite3.o Makefile
+	$(T.link) $(ST_OPT) -o $@ $(TOP)/test/fp-speed-2.c sqlite3.o \
+		$(LDFLAGS.libsqlite3)
 
 startup$(T.exe):	$(TOP)/test/startup.c sqlite3.c
 	$(T.link) -Os -g -USQLITE_THREADSAFE -DSQLITE_THREADSAFE=0 \
@@ -2113,16 +2158,19 @@ src-archives: sqlite-amalgamation.zip amalgamation-tarball sqlite-src.zip
 
 # Build a ZIP archive containing various command-line tools.
 #
-tool-zip:	testfixture$(T.exe) sqlite3$(T.exe) sqldiff$(T.exe) \
-            sqlite3_analyzer$(T.exe) sqlite3_rsync$(T.exe) $(TOP)/tool/mktoolzip.tcl
-	strip sqlite3$(T.exe) sqldiff$(T.exe) sqlite3_analyzer$(T.exe) sqlite3_rsync$(T.exe)
-	./testfixture$(T.exe) $(TOP)/tool/mktoolzip.tcl
+tool-zip:	sqlite3$(T.exe) sqldiff$(T.exe) \
+            sqlite3_rsync$(T.exe) $(TOP)/tool/mktoolzip.tcl
+	strip sqlite3$(T.exe) sqldiff$(T.exe) sqlite3_rsync$(T.exe)
+	$(TCLSH_CMD) $(TOP)/tool/mktoolzip.tcl
+
 snapshot-zip:	testfixture$(T.exe) sqlite3$(T.exe) sqldiff$(T.exe) \
-            sqlite3_analyzer$(T.exe) sqlite3_rsync$(T.exe) $(TOP)/tool/mktoolzip.tcl
-	strip sqlite3$(T.exe) sqldiff$(T.exe) sqlite3_analyzer$(T.exe) sqlite3_rsync$(T.exe)
-	./testfixture$(T.exe) $(TOP)/tool/mktoolzip.tcl --snapshot
+            sqlite3_rsync$(T.exe) $(TOP)/tool/mktoolzip.tcl
+	strip sqlite3$(T.exe) sqldiff$(T.exe) sqlite3_rsync$(T.exe)
+	$(TCLSH_CMD) $(TOP)/tool/mktoolzip.tcl --snapshot
+
 clean-tool-zip:
 	rm -f sqlite-tools-*.zip
+
 clean: clean-tool-zip
 
 #
@@ -2244,11 +2292,6 @@ install: install-man1
 install-pc: sqlite3.pc $(install-dir.pkgconfig)
 	$(INSTALL.noexec) sqlite3.pc "$(install-dir.pkgconfig)"
 
-scrub$(T.exe):	$(TOP)/ext/misc/scrub.c sqlite3.o
-	$(T.link) -o $@ -I. -DSCRUB_STANDALONE \
-		$(TOP)/ext/misc/scrub.c sqlite3.o $(LDFLAGS.libsqlite3)
-xbin: scrub$(T.exe)
-
 srcck1$(B.exe):	$(TOP)/tool/srcck1.c
 	$(B.cc) -o srcck1$(B.exe) $(TOP)/tool/srcck1.c
 xbin: srcck1$(B.exe)
@@ -2269,23 +2312,23 @@ fuzzershell$(T.exe):	$(TOP)/tool/fuzzershell.c sqlite3.c sqlite3.h
 fuzzy: fuzzershell$(T.exe)
 xbin: fuzzershell$(T.exe)
 
-fuzzcheck$(T.exe):	$(FUZZCHECK_SRC) sqlite3.c sqlite3.h $(FUZZCHECK_DEP)
-	$(T.link) -o $@ $(FUZZCHECK_OPT) $(FUZZCHECK_SRC) sqlite3.c $(LDFLAGS.libsqlite3)
+fuzzcheck$(T.exe):	$(FUZZCHECK_SRC) $(FUZZCHECK_DEP)
+	$(T.link) -o $@ $(FUZZCHECK_OPT) $(FUZZCHECK_SRC) $(LDFLAGS.libsqlite3)
 fuzzy: fuzzcheck$(T.exe)
 xbin: fuzzcheck$(T.exe)
 
 # -fsanitize=... flags for fuzzcheck-asan.
 CFLAGS.fuzzcheck-asan.fsanitize ?= -fsanitize=address
 
-fuzzcheck-asan$(T.exe):	$(FUZZCHECK_SRC) sqlite3.c sqlite3.h $(FUZZCHECK_DEP)
+fuzzcheck-asan$(T.exe):	$(FUZZCHECK_SRC) $(FUZZCHECK_DEP)
 	$(T.link) -o $@ $(CFLAGS.fuzzcheck-asan.fsanitize) $(FUZZCHECK_OPT) $(FUZZCHECK_SRC) \
-		sqlite3.c $(LDFLAGS.libsqlite3)
+		$(LDFLAGS.libsqlite3)
 fuzzy: fuzzcheck-asan$(T.exe)
 xbin: fuzzcheck-asan$(T.exe)
 
-fuzzcheck-ubsan$(T.exe):	$(FUZZCHECK_SRC) sqlite3.c sqlite3.h $(FUZZCHECK_DEP)
+fuzzcheck-ubsan$(T.exe):	$(FUZZCHECK_SRC) $(FUZZCHECK_DEP)
 	$(T.link) -o $@ -fsanitize=undefined $(FUZZCHECK_OPT) $(FUZZCHECK_SRC) \
-		sqlite3.c $(LDFLAGS.libsqlite3)
+		$(LDFLAGS.libsqlite3)
 fuzzy: fuzzcheck-ubsan$(T.exe)
 xbin: fuzzcheck-ubsan$(T.exe)
 
@@ -2358,15 +2401,18 @@ SHELL_DEP = \
     $(TOP)/ext/misc/base85.c \
     $(TOP)/ext/misc/completion.c \
     $(TOP)/ext/misc/decimal.c \
+    $(TOP)/ext/misc/diskused.c \
     $(TOP)/ext/misc/fileio.c \
     $(TOP)/ext/misc/ieee754.c \
     $(TOP)/ext/misc/memtrace.c \
+    $(TOP)/ext/misc/optname.c \
     $(TOP)/ext/misc/pcachetrace.c \
     $(TOP)/ext/misc/regexp.c \
     $(TOP)/ext/misc/series.c \
     $(TOP)/ext/misc/sha1.c \
     $(TOP)/ext/misc/shathree.c \
     $(TOP)/ext/misc/sqlar.c \
+    $(TOP)/ext/misc/strdup.c \
     $(TOP)/ext/misc/uint.c \
     $(TOP)/ext/misc/vfstrace.c \
     $(TOP)/ext/misc/windirent.h \
@@ -2434,6 +2480,10 @@ sqlite3session.o:	$(TOP)/ext/session/sqlite3session.c $(DEPS_EXT_COMMON)
 stmt.o:	$(TOP)/ext/misc/stmt.c $(DEPS_EXT_COMMON)
 	$(T.cc.extension) -c $(TOP)/ext/misc/stmt.c
 
+$(AUXTEST): $(TOP)/test/c/$(AUXTEST).c
+	$(T.cc.sqlite) -o $@ $(TOP)/test/c/$(AUXTEST).c sqlite3.o $(LDFLAGS.libsqlite3)
+
+
 #
 # Windows section
 #
@@ -2486,6 +2536,7 @@ help:
 tidy:
 	rm -f *.o *.obj *.c *.da *.bb *.bbg gmon.* *.rws sqlite3$(T.exe)
 	rm -f fts5.h keywordhash.h opcodes.h sqlite3.h sqlite3ext.h sqlite3session.h
+	rm -f vec1$(T.dll)
 	rm -rf .libs .deps tsrc .target_source
 	rm -f lemon$(B.exe) sqlite*.tar.gz
 	rm -f mkkeywordhash$(B.exe) mksourceid$(B.exe)
@@ -2494,6 +2545,7 @@ tidy:
 	rm -f tclsqlite3$(T.exe) $(TESTPROGS)
 	rm -f LogEst$(T.exe) fts3view$(T.exe) rollback-test$(T.exe) showdb$(T.exe)
 	rm -f showjournal$(T.exe) showstat4$(T.exe) showwal$(T.exe) speedtest1$(T.exe)
+	rm -f fp-speed-1$(T.exe) fp-speed-2$(T.exe)
 	rm -f wordcount$(T.exe) changeset$(T.exe) version-info$(T.exe)
 	rm -f *.exp *.vsix pkgIndex.tcl
 	rm -f sqlite3_analyzer$(T.exe) sqlite3_rsync$(T.exe) sqlite3_expert$(T.exe)
@@ -2516,7 +2568,7 @@ tidy:
 # Removes build products and test logs.  Retains ./configure outputs.
 #
 clean:	tidy
-	rm -rf omittest* testrunner* testdir*
+	rm -rf omittest* testrunner* testrun_* testdir*
 
 #
 # Clean up everything.  No exceptions. From an out-of-tree build which

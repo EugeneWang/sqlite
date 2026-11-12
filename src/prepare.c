@@ -110,6 +110,7 @@ int sqlite3InitCallback(void *pInit, int argc, char **argv, char **NotUsed){
   }
 
   assert( iDb>=0 && iDb<db->nDb );
+  assert( db->aDb[iDb].pSchema!=0 );
   if( argv[3]==0 ){
     corruptSchema(pData, argv, 0);
   }else if( argv[4]
@@ -128,10 +129,18 @@ int sqlite3InitCallback(void *pInit, int argc, char **argv, char **NotUsed){
     int rc;
     u8 saved_iDb = db->init.iDb;
     sqlite3_stmt *pStmt;
+    const char *zEnd;
     TESTONLY(int rcp);            /* Return code from sqlite3_prepare() */
 
     assert( db->init.busy );
     db->init.iDb = iDb;
+
+    /* We never try to parse a trigger on a read-only database */
+    assert( db->aDb[iDb].pBt==0
+         || sqlite3BtreeIsReadonly(db->aDb[iDb].pBt)==0
+         || sqlite3_stricmp(argv[0],"trigger")!=0
+         || CORRUPT_DB );
+
     if( sqlite3GetUInt32(argv[3], &db->init.newTnum)==0
      || (db->init.newTnum>pData->mxPage && pData->mxPage>0)
     ){
@@ -142,7 +151,7 @@ int sqlite3InitCallback(void *pInit, int argc, char **argv, char **NotUsed){
     db->init.orphanTrigger = 0;
     db->init.azInit = (const char**)argv;
     pStmt = 0;
-    TESTONLY(rcp = ) sqlite3Prepare(db, argv[4], -1, 0, 0, &pStmt, 0);
+    TESTONLY(rcp = ) sqlite3Prepare(db, argv[4], -1, 0, 0, &pStmt, &zEnd);
     rc = db->errCode;
     assert( (rc&0xFF)==(rcp&0xFF) );
     db->init.iDb = saved_iDb;
@@ -158,6 +167,8 @@ int sqlite3InitCallback(void *pInit, int argc, char **argv, char **NotUsed){
           corruptSchema(pData, argv, sqlite3_errmsg(db));
         }
       }
+    }else if( zEnd[0] ){
+      corruptSchema(pData, argv, 0);
     }
     db->init.azInit = sqlite3StdType; /* Any array of string ptrs will do */
     sqlite3_finalize(pStmt);
@@ -183,6 +194,16 @@ int sqlite3InitCallback(void *pInit, int argc, char **argv, char **NotUsed){
       if( sqlite3Config.bExtraSchemaChecks ){
         corruptSchema(pData, argv, "invalid rootpage");
       }
+    }
+  }
+  if( pData->pzErrMsg[0]==0 ){
+    Schema *pX = db->aDb[iDb].pSchema;
+    if( pX->tblHash.count + pX->idxHash.count + pX->trigHash.count
+                   > (u32)db->aLimit[SQLITE_LIMIT_SCHEMA]
+    ){
+      *pData->pzErrMsg = sqlite3MPrintf(db, "too many schema objects");
+      pData->rc = SQLITE_ERROR;
+      return 1;
     }
   }
   return 0;
@@ -216,7 +237,13 @@ int sqlite3InitOne(sqlite3 *db, int iDb, char **pzErrMsg, u32 mFlags){
   assert( sqlite3_mutex_held(db->mutex) );
   assert( iDb==1 || sqlite3BtreeHoldsMutex(db->aDb[iDb].pBt) );
 
-  db->init.busy = 1;
+  db->init.busy = 1 + ((mFlags & INITFLAG_AlterAdd)!=0);
+  /* ^--- Any non-zero value for init.busy means that we are scanning
+  ** the sqlite_schema table to build the internal schema representation,
+  ** rather than running actual CREATE statements.  init.busy==2 has the
+  ** additional meaning that the scan is happening as part of
+  ** ALTER TABLE ADD COLUMN, which is stricter in its enforcement of
+  ** function name resolution. */
 
   /* Construct the in-memory representation schema tables (sqlite_schema or
   ** sqlite_temp_schema) by invoking the parser directly.  The appropriate
@@ -363,8 +390,9 @@ int sqlite3InitOne(sqlite3 *db, int iDb, char **pzErrMsg, u32 mFlags){
   {
     char *zSql;
     zSql = sqlite3MPrintf(db, 
-        "SELECT*FROM\"%w\".%s ORDER BY rowid",
-        db->aDb[iDb].zDbSName, zSchemaTabName);
+        "SELECT*FROM\"%w\".%s %sORDER BY rowid",
+        db->aDb[iDb].zDbSName, zSchemaTabName,
+        sqlite3BtreeIsReadonly(db->aDb[iDb].pBt)?"WHERE type<>'trigger'":"");
 #ifndef SQLITE_OMIT_AUTHORIZATION
     {
       sqlite3_xauth xAuth;
@@ -385,6 +413,12 @@ int sqlite3InitOne(sqlite3 *db, int iDb, char **pzErrMsg, u32 mFlags){
 #endif
   }
   assert( pDb == &(db->aDb[iDb]) );
+
+  /* Confirm that TRIGGERs are not parsed on a read-only database */
+  assert( sqlite3BtreeIsReadonly(pDb->pBt)==0
+       || sqliteHashCount(&pDb->pSchema->trigHash)==0
+       || CORRUPT_DB );
+
   if( db->mallocFailed ){
     rc = SQLITE_NOMEM_BKPT;
     sqlite3ResetAllSchemasOfConnection(db);
@@ -420,7 +454,7 @@ error_out:
     if( rc==SQLITE_NOMEM || rc==SQLITE_IOERR_NOMEM ){
       sqlite3OomFault(db);
     }
-    sqlite3ResetOneSchema(db, iDb);
+    sqlite3ResetOneSchema(db, iDb, 0);
   }
   db->init.busy = 0;
   return rc;
@@ -522,7 +556,7 @@ static void schemaIsValid(Parse *pParse){
     assert( sqlite3SchemaMutexHeld(db, iDb, 0) );
     if( cookie!=db->aDb[iDb].pSchema->schema_cookie ){
       if( DbHasProperty(db, iDb, DB_SchemaLoaded) ) pParse->rc = SQLITE_SCHEMA;
-      sqlite3ResetOneSchema(db, iDb);
+      sqlite3ResetOneSchema(db, iDb, 0);
     }
 
     /* Close the transaction, if one was opened. */
@@ -575,7 +609,7 @@ void sqlite3ParseObjectReset(Parse *pParse){
   assert( db->pParse==pParse );
   assert( pParse->nested==0 );
 #ifndef SQLITE_OMIT_SHARED_CACHE
-  if( pParse->aTableLock ) sqlite3DbNNFreeNN(db, pParse->aTableLock);
+  if( pParse->nTableLock ) sqlite3DbNNFreeNN(db, pParse->aTableLock);
 #endif
   while( pParse->pCleanup ){
     ParseCleanup *pCleanup = pParse->pCleanup;
@@ -659,6 +693,7 @@ void *sqlite3ParserAddCleanup(
 ** is generated by Lemon.
 */
 void sqlite3ParseObjectInit(Parse *pParse, sqlite3 *db){
+  assert( db!=0 );
   memset(PARSE_HDR(pParse), 0, PARSE_HDR_SZ);
   memset(PARSE_TAIL(pParse), 0, PARSE_TAIL_SZ);
   assert( db->pParse!=pParse );
@@ -863,7 +898,7 @@ static int sqlite3LockAndPrepare(
     if( rc==SQLITE_OK || db->mallocFailed ) break;
     cnt++;
   }while( (rc==SQLITE_ERROR_RETRY && ALWAYS(cnt<=SQLITE_MAX_PREPARE_RETRY))
-       || (rc==SQLITE_SCHEMA && (sqlite3ResetOneSchema(db,-1), cnt)==1) );
+       || (rc==SQLITE_SCHEMA && (sqlite3ResetOneSchema(db,-1,0), cnt)==1) );
   sqlite3BtreeLeaveAll(db);
   assert( rc!=SQLITE_ERROR_RETRY );
   rc = sqlite3ApiExit(db, rc);
@@ -1058,7 +1093,7 @@ int sqlite3_prepare16(
   const void **pzTail       /* OUT: End of parsed string */
 ){
   int rc;
-  rc = sqlite3Prepare16(db,zSql,nBytes,0,ppStmt,pzTail);
+  rc = sqlite3Prepare16(db,zSql,nBytes&~1,0,ppStmt,pzTail);
   assert( rc==SQLITE_OK || ppStmt==0 || *ppStmt==0 );  /* VERIFY: F13021 */
   return rc;
 }
@@ -1070,7 +1105,7 @@ int sqlite3_prepare16_v2(
   const void **pzTail       /* OUT: End of parsed string */
 ){
   int rc;
-  rc = sqlite3Prepare16(db,zSql,nBytes,SQLITE_PREPARE_SAVESQL,ppStmt,pzTail);
+  rc = sqlite3Prepare16(db,zSql,nBytes&~1,SQLITE_PREPARE_SAVESQL,ppStmt,pzTail);
   assert( rc==SQLITE_OK || ppStmt==0 || *ppStmt==0 );  /* VERIFY: F13021 */
   return rc;
 }
@@ -1083,7 +1118,7 @@ int sqlite3_prepare16_v3(
   const void **pzTail       /* OUT: End of parsed string */
 ){
   int rc;
-  rc = sqlite3Prepare16(db,zSql,nBytes,
+  rc = sqlite3Prepare16(db,zSql,nBytes&~1,
          SQLITE_PREPARE_SAVESQL|(prepFlags&SQLITE_PREPARE_MASK),
          ppStmt,pzTail);
   assert( rc==SQLITE_OK || ppStmt==0 || *ppStmt==0 );  /* VERIFY: F13021 */

@@ -525,7 +525,17 @@ static const sqlite3_api_routines sqlite3Apis = {
   sqlite3_db_status64,
   /* Version 3.52.0 and later */
   sqlite3_str_truncate,
-  sqlite3_str_free
+  sqlite3_str_free,
+#ifdef SQLITE_ENABLE_CARRAY
+  sqlite3_carray_bind,
+  sqlite3_carray_bind_v2,
+#else
+  0,
+  0,
+#endif
+  /* Version 3.54.0 and later */
+  sqlite3_incomplete,
+  sqlite3_result_str
 };
 
 /* True if x is the directory separator character
@@ -851,25 +861,32 @@ int sqlite3_auto_extension(
 int sqlite3_cancel_auto_extension(
   void (*xInit)(void)
 ){
-#if SQLITE_THREADSAFE
-  sqlite3_mutex *mutex = sqlite3MutexAlloc(SQLITE_MUTEX_STATIC_MAIN);
-#endif
-  int i;
   int n = 0;
-  wsdAutoextInit;
-#ifdef SQLITE_ENABLE_API_ARMOR
-  if( xInit==0 ) return 0;
+#ifndef SQLITE_OMIT_AUTOINIT
+  if( sqlite3_initialize() ){
+    return 0;
+  }else
 #endif
-  sqlite3_mutex_enter(mutex);
-  for(i=(int)wsdAutoext.nExt-1; i>=0; i--){
-    if( wsdAutoext.aExt[i]==xInit ){
-      wsdAutoext.nExt--;
-      wsdAutoext.aExt[i] = wsdAutoext.aExt[wsdAutoext.nExt];
-      n++;
-      break;
+  {
+#if SQLITE_THREADSAFE
+    sqlite3_mutex *mutex = sqlite3MutexAlloc(SQLITE_MUTEX_STATIC_MAIN);
+#endif
+    int i;
+    wsdAutoextInit;
+#ifdef SQLITE_ENABLE_API_ARMOR
+    if( xInit==0 ) return 0;
+#endif
+    sqlite3_mutex_enter(mutex);
+    for(i=(int)wsdAutoext.nExt-1; i>=0; i--){
+      if( wsdAutoext.aExt[i]==xInit ){
+        wsdAutoext.nExt--;
+        wsdAutoext.aExt[i] = wsdAutoext.aExt[wsdAutoext.nExt];
+        n++;
+        break;
+      }
     }
+    sqlite3_mutex_leave(mutex);
   }
-  sqlite3_mutex_leave(mutex);
   return n;
 }
 
